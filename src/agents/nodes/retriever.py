@@ -105,6 +105,10 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
     limit = settings.MAX_PAPERS_PER_SOURCE
     fast_mode = bool(state.get("fast_mode", False))
     stop_event = state.get("_stop_event")  # threading.Event or None
+    # For fetch-more rounds, skip the first N results so each round returns
+    # a fresh page of results rather than repeating what was already shown.
+    fetch_round = int(state.get("fetch_round") or 0)
+    source_offset = fetch_round * limit
 
     # Single wall-clock budget for ALL parallel threads.
     # Increased to 45s (normal) to accommodate the _DDGS_SEMAPHORE in
@@ -133,7 +137,7 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
 
         results = []
         try:
-            results = fn(query, max_results=limit)
+            results = fn(query, max_results=limit, offset=source_offset)
         except Exception as exc:
             logger.warning("Source '%s' primary query failed: %s", src_name, exc)
             with lock:
@@ -147,7 +151,7 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
             if stop_event and stop_event.is_set():
                 return
             try:
-                results = fn(fallback_query, max_results=limit)
+                results = fn(fallback_query, max_results=limit, offset=source_offset)
                 if results:
                     logger.info("Source '%s': fallback query returned %d results",
                                 src_name, len(results))

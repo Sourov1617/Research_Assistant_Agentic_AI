@@ -15,7 +15,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from src.utils.json_utils import robust_json_parse
 
 if TYPE_CHECKING:
     from src.agents.state import ResearchState
@@ -108,7 +108,9 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
         model=state.get("llm_model"),
         temperature=state.get("llm_temperature"),
     )
-    chain = _INSIGHT_PROMPT | llm | JsonOutputParser()
+    # Use llm directly (no JsonOutputParser) so we can apply our own
+    # trailing-comma-tolerant parser that handles common LLM JSON quirks.
+    chain = _INSIGHT_PROMPT | llm
     stop_event = state.get("_stop_event")
 
     # Push live status immediately.
@@ -127,6 +129,7 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
     )
     try:
         deadline = _INSIGHT_TIMEOUT
+        raw_response = None
         while deadline > 0:
             if stop_event and stop_event.is_set():
                 logger.info("Insight generation cancelled by stop_event.")
@@ -134,13 +137,23 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
                 return {**state, "insights": _fallback_insights(papers),
                         "status_message": "\U0001f6d1 Search stopped."}
             try:
-                insights = future.result(timeout=min(1.0, deadline))
+                raw_response = future.result(timeout=min(1.0, deadline))
                 break
             except concurrent.futures.TimeoutError:
                 deadline -= 1.0
         else:
             logger.warning("Insight generation timed out after %ss \u2014 using fallback.", _INSIGHT_TIMEOUT)
             insights = _fallback_insights(papers)
+            raw_response = None
+
+        if raw_response is not None:
+            # raw_response is an AIMessage; extract the text content
+            content = getattr(raw_response, "content", "") or str(raw_response)
+            insights = robust_json_parse(content)
+            if not insights:
+                logger.warning("Insight JSON parse returned empty dict — using fallback.")
+                insights = _fallback_insights(papers)
+
     except Exception as exc:
         logger.error("Insight generation failed: %s", exc)
         insights = _fallback_insights(papers)

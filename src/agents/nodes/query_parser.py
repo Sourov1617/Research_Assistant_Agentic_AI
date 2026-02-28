@@ -11,7 +11,7 @@ import re
 from typing import TYPE_CHECKING
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from src.utils.json_utils import RobustJsonOutputParser
 
 if TYPE_CHECKING:
     from src.agents.state import ResearchState
@@ -87,7 +87,7 @@ def parse_query_node(state: "ResearchState") -> "ResearchState":
         model=state.get("llm_model"),
         temperature=state.get("llm_temperature"),
     )
-    chain = _PARSE_PROMPT | llm | JsonOutputParser()
+    chain = _PARSE_PROMPT | llm | RobustJsonOutputParser()
     stop_event = state.get("_stop_event")
 
     # Push a live status update so the UI shows activity immediately,
@@ -120,6 +120,11 @@ def parse_query_node(state: "ResearchState") -> "ResearchState":
                         "status_message": "🛑 Search stopped."}
             try:
                 intent = future.result(timeout=min(1.0, deadline))
+                # RobustJsonOutputParser returns {} on silent parse failure —
+                # use the keyword-based fallback so we always have something.
+                if not intent:
+                    logger.warning("Query parse LLM returned empty/invalid JSON — using fallback intent.")
+                    intent = _fallback_intent(query)
                 break
             except concurrent.futures.TimeoutError:
                 deadline -= 1.0

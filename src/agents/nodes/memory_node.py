@@ -9,7 +9,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from src.utils.json_utils import RobustJsonOutputParser
 
 if TYPE_CHECKING:
     from src.agents.state import ResearchState
@@ -104,7 +104,7 @@ def update_memory_node(state: "ResearchState") -> "ResearchState":
             provider=state.get("llm_provider"),
             model=state.get("llm_model"),
         )
-        chain = _FOLLOWUP_PROMPT | llm | JsonOutputParser()
+        chain = _FOLLOWUP_PROMPT | llm | RobustJsonOutputParser()
 
         followup = chain.invoke({
             "history_summary": history_summary,

@@ -24,10 +24,12 @@ _FIELDS = (
 def search_semantic_scholar(
     query: str,
     max_results: Optional[int] = None,
+    offset: int = 0,
 ) -> list[dict]:
     """
     Search Semantic Scholar and return normalized paper dicts.
     Results are sorted by relevance; year-based re-ranking happens in the ranker.
+    offset — number of results to skip (for fetch-more pagination).
     """
     limit = min(max_results or settings.MAX_PAPERS_PER_SOURCE, 100)
     results = []
@@ -39,6 +41,7 @@ def search_semantic_scholar(
     params = {
         "query": query,
         "limit": limit,
+        "offset": offset,
         "fields": _FIELDS,
     }
 

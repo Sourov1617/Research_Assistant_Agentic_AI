@@ -24,6 +24,7 @@ ARXIV_CATEGORIES = {
 def search_arxiv(
     query: str,
     max_results: Optional[int] = None,
+    offset: int = 0,
     sort_by: arxiv.SortCriterion = arxiv.SortCriterion.SubmittedDate,
 ) -> list[dict]:
     """
@@ -35,21 +36,25 @@ def search_arxiv(
         Free-text or keyword search query.
     max_results : int, optional
         Number of results (defaults to ARXIV_MAX_RESULTS in .env).
+    offset : int
+        Number of results to skip (for fetch-more pagination).
     sort_by : arxiv.SortCriterion
         Sort order — default is newest first.
     """
     limit = max_results or settings.ARXIV_MAX_RESULTS
+    # To skip `offset` results we request `limit + offset` total and slice.
+    fetch_total = limit + offset
     results = []
 
     try:
         client = arxiv.Client(num_retries=3, delay_seconds=1)
         search = arxiv.Search(
             query=query,
-            max_results=limit,
+            max_results=fetch_total,
             sort_by=sort_by,
             sort_order=arxiv.SortOrder.Descending,
         )
-        papers = list(client.results(search))
+        papers = list(client.results(search))[offset:]
 
         for paper in papers:
             authors = [str(a) for a in paper.authors]

@@ -52,6 +52,7 @@ def search_web(
     query: str,
     max_results: Optional[int] = None,
     include_domains: Optional[list[str]] = None,
+    offset: int = 0,  # accepted but not used — DuckDuckGo has no offset API
 ) -> list[dict]:
     """
     Search the web and return normalized result dicts.

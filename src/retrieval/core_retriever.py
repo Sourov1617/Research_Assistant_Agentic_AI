@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 def search_core(
     query: str,
     max_results: Optional[int] = None,
+    offset: int = 0,
 ) -> list[dict]:
     """
     Search CORE for open-access papers and return normalized paper dicts.
+    offset — number of results to skip (for fetch-more pagination).
     """
     limit = min(max_results or settings.MAX_PAPERS_PER_SOURCE, 100)
 
@@ -39,7 +41,7 @@ def search_core(
     payload = {
         "q": query,
         "limit": limit,
-        "offset": 0,
+        "offset": offset,
         "sort": "recency",
     }
 

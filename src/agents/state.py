@@ -19,6 +19,7 @@ class ResearchState(TypedDict, total=False):
     year_max: Optional[int]        # Pre-search max publication year filter
     fast_mode: Optional[bool]      # If True, use short timeouts for speed
     enabled_sources: Optional[list]  # List of source keys the user enabled; None → all
+    fetch_round: Optional[int]     # 0=initial search, 1=first fetch-more, 2=second, …
     _stop_event: Optional[Any]     # threading.Event passed from UI for immediate cancellation
     _agent_queue: Optional[Any]    # queue.Queue passed from UI for real-time node status pushes
 

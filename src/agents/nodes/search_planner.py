@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from src.utils.json_utils import RobustJsonOutputParser
 
 if TYPE_CHECKING:
     from src.agents.state import ResearchState
@@ -112,7 +112,7 @@ def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
         model=state.get("llm_model"),
         temperature=state.get("llm_temperature"),
     )
-    chain = _PLAN_PROMPT | llm | JsonOutputParser()
+    chain = _PLAN_PROMPT | llm | RobustJsonOutputParser()
     stop_event = state.get("_stop_event")
 
     # Push live status so user sees activity immediately while LLM thinks.
@@ -146,6 +146,12 @@ def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
                         "status_message": "🛑 Search stopped."}
             try:
                 plan = future.result(timeout=min(1.0, deadline))
+                # RobustJsonOutputParser returns {} on silent parse failure —
+                # that produces a sources-less plan which would send 0 queries.
+                # Fall back to the default plan whenever sources is absent/empty.
+                if not plan or not plan.get("sources"):
+                    logger.warning("Search plan LLM returned empty/invalid JSON — using default plan.")
+                    plan = _default_plan(state.get("query", ""), intent, year_after=year_after)
                 plan["year_after"] = year_after
                 if state.get("year_max"):
                     plan["year_max"] = state["year_max"]

@@ -248,6 +248,16 @@ def _init_session():
         "agent_stopped": False,
         # search options
         "fast_mode": False,
+        # infinite pagination / fetch-more
+        "all_papers": [],          # accumulated across all fetch rounds for current query
+        "seen_paper_keys": set(),  # URL/DOI/title keys already shown (for dedup)
+        "last_search_cfg": {},     # saved params to re-run the same query
+        "is_fetching_more": False, # True while a background "fetch more" search runs
+        "no_more_papers": False,   # True when a fetch-more search returned 0 new papers
+        "fetch_more_queue": None,  # queue for fetch-more background thread
+        "fetch_round": 0,          # current pagination round (0=initial, 1=first fetch-more…)
+        "fetch_more_status": "",   # live status message from the fetch-more pipeline
+        "fetch_more_step": 0,      # pipeline step counter for the progress bar
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -613,6 +623,10 @@ def render_main():
     if st.session_state.is_running:
         _progress_fragment()
 
+    # ── Fetch-more polling fragment (runs silently in background) ──────────
+    if st.session_state.get("is_fetching_more"):
+        _fetch_more_fragment()
+
     # ── Display results ────────────────────────────────────────────────────
     if st.session_state.research_state and not st.session_state.is_running:
         render_results(st.session_state.research_state)
@@ -635,7 +649,19 @@ def _start_agent(query: str):
     st.session_state.agent_stopped      = False
     st.session_state.is_running         = True
     st.session_state.research_state     = None
-    st.session_state.paper_page         = 0   # reset to first page for new query
+    # Reset per-query pagination / fetch-more state
+    st.session_state.paper_page         = 0
+    st.session_state.all_papers         = []
+    st.session_state.seen_paper_keys    = set()
+    st.session_state.no_more_papers     = False
+    st.session_state.is_fetching_more   = False
+    st.session_state.fetch_more_queue   = None
+    st.session_state.fetch_round        = 0
+    st.session_state.fetch_more_status  = ""
+    st.session_state.fetch_more_step    = 0
+    # Clear widget filter state so it resets to "all sources" for the new query
+    for _k in ("src_filter", "year_range", "sort_by"):
+        st.session_state.pop(_k, None)
 
     cfg = dict(
         query=query,
@@ -694,8 +720,275 @@ def _start_agent(query: str):
                 "detail": tb,
             })
 
+    # Save query config (without per-run threading objects) for fetch-more re-use
+    st.session_state.last_search_cfg = {
+        k: v for k, v in cfg.items()
+        if k not in ("stop_event", "agent_queue")
+    }
+
     threading.Thread(target=_worker, daemon=True).start()
     st.rerun()
+
+
+# ── Fetch-more helpers ───────────────────────────────────────────────────────
+
+def _append_papers_to_all(papers: list) -> int:
+    """
+    Dedup-merge *papers* into ``st.session_state.all_papers``.
+    Returns the number of genuinely new papers added.
+    Papers are keyed by URL → DOI → first 80 chars of title (in that order).
+
+    Also auto-expands the "src_filter" multiselect to include any sources
+    that appear for the first time in this batch, so newly fetched papers
+    are never silently hidden by a stale filter selection.
+    """
+    seen: set = st.session_state.get("seen_paper_keys") or set()
+    existing: list = st.session_state.get("all_papers") or []
+    new_papers: list = []
+    for p in papers:
+        key = (p.get("url") or "").strip()
+        if not key:
+            key = (p.get("doi") or "").strip()
+        if not key:
+            key = (p.get("title") or "").lower().strip()[:80]
+        if key and key not in seen:
+            seen.add(key)
+            new_papers.append(p)
+    st.session_state.seen_paper_keys = seen
+    st.session_state.all_papers = existing + new_papers
+
+    # Auto-expand the source filter to include any brand-new sources.
+    # Without this, papers from sources that weren't in the original round
+    # would never appear in the filtered list, keeping total_pages stuck at 1.
+    if new_papers:
+        existing_filter: list = st.session_state.get("src_filter") or []
+        if existing_filter:  # only patch when the widget has already been rendered
+            new_sources = {
+                p.get("source", "Unknown") for p in new_papers
+                if p.get("source", "Unknown") not in existing_filter
+            }
+            if new_sources:
+                st.session_state["src_filter"] = sorted(
+                    set(existing_filter) | new_sources
+                )
+
+    return len(new_papers)
+
+
+def _start_fetch_more():
+    """
+    Launch a background "fetch more" round using the same query but with FRESH
+    sidebar settings (so the user CAN change sources, year filters, temperature,
+    etc. between rounds).  Each round asks sources for the NEXT page of results
+    via fetch_round-based offsets, so new papers are returned instead of
+    re-fetching the ones already shown.
+    """
+    base_cfg = st.session_state.get("last_search_cfg") or {}
+    query = base_cfg.get("query") or ""
+    if not query:
+        st.warning("⚠️ Cannot fetch more: original query not found. Please run a search first.")
+        return
+    if st.session_state.get("is_fetching_more"):
+        return  # already underway
+
+    # Increment round so each source skips the results already shown
+    round_num = int(st.session_state.get("fetch_round", 0)) + 1
+    st.session_state.fetch_round       = round_num
+    st.session_state.fetch_more_status = "🚀 Starting fetch-more search…"
+    st.session_state.fetch_more_step   = 0
+    st.session_state.no_more_papers    = False
+
+    stop_event = threading.Event()
+    fq: queue.Queue = queue.Queue()
+    st.session_state.fetch_more_queue = fq
+    st.session_state.stop_event       = stop_event
+    st.session_state.is_fetching_more = True
+
+    # Build a FRESH config from CURRENT sidebar state.  Only the query is
+    # reused; everything else (sources, years, model, temperature) is re-read
+    # so the user can adjust any setting between fetch-more rounds.
+    cfg = dict(
+        query=query,
+        llm_provider=st.session_state.get("selected_provider"),
+        llm_model=st.session_state.get("selected_model"),
+        llm_temperature=st.session_state.get("llm_temperature", 0.3),
+        memory_enabled=False,   # don't re-write memory on fetch-more rounds
+        session_id=None,
+        year_min=st.session_state.get("year_min_pre"),
+        year_max=st.session_state.get("year_max_pre"),
+        fast_mode=st.session_state.get("fast_mode", False),
+        fetch_round=round_num,
+        enabled_sources=[
+            src for src, key in {
+                "arxiv":            "src_arxiv",
+                "semantic_scholar": "src_ss",
+                "crossref":         "src_crossref",
+                "core":             "src_core",
+                "ieee_web":         "src_ieee",
+                "sciencedirect_web":"src_scidir",
+                "mdpi_web":         "src_mdpi",
+                "nature_web":       "src_nature",
+                "acm_web":          "src_acm",
+                "springer_web":     "src_springer",
+                "openreview_web":   "src_openreview",
+            }.items()
+            if st.session_state.get(key, True)
+        ],
+    )
+
+    def _fm_worker():
+        final = None
+        try:
+            first_chunk = True
+            for upd in stream_research_agent(**cfg, stop_event=stop_event, agent_queue=fq):
+                if first_chunk:
+                    # skip the LangGraph initial-state echo chunk
+                    first_chunk = False
+                    continue
+                if stop_event.is_set():
+                    break
+                final = upd
+                # Forward node-completion status so the progress box updates live
+                status = upd.get("status_message", "")
+                if status:
+                    fq.put({"_type": "fm_update", "status": status})
+        except Exception as exc:
+            import logging as _log
+            _log.getLogger(__name__).warning("fetch-more worker failed: %s", exc)
+            fq.put({"_type": "fm_error", "msg": str(exc)})
+            return
+        papers = []
+        if final:
+            papers = final.get("synthesized_papers") or final.get("ranked_papers", [])
+        fq.put({"_type": "fm_complete", "papers": papers})
+
+    threading.Thread(target=_fm_worker, daemon=True).start()
+    st.rerun()
+
+
+@st.fragment(run_every=1)
+def _fetch_more_fragment():
+    """
+    Auto-refreshes every second while a fetch-more search is running.
+    • Drains the fetch_more_queue for status / completion messages.
+    • Renders a live pipeline checklist so the user sees progress.
+    • On completion: appends new papers to all_papers, jumps to the first new
+      page, and triggers a full-page rerun so the updated list appears.
+    """
+    fq: "queue.Queue | None" = st.session_state.get("fetch_more_queue")
+    if not st.session_state.get("is_fetching_more") or not fq:
+        return
+
+    done = False
+    while True:
+        try:
+            msg = fq.get_nowait()
+        except queue.Empty:
+            break
+
+        mtype = msg.get("_type", "")
+        if mtype == "interim":
+            # Real-time push from inside a node (e.g. planner “LLM thinking…”)
+            s = msg.get("status_message", "")
+            if s:
+                st.session_state.fetch_more_status = s
+        elif mtype == "fm_update":
+            # A pipeline node just completed — advance step counter + status
+            s = msg.get("status", "")
+            if s:
+                st.session_state.fetch_more_status = s
+            st.session_state.fetch_more_step = (
+                st.session_state.get("fetch_more_step", 0) + 1
+            )
+        elif mtype == "fm_complete":
+            _PAGE_SIZE = 15
+            import math as _math
+            prev_total = len(st.session_state.get("all_papers") or [])
+            new_added = _append_papers_to_all(msg.get("papers", []))
+            st.session_state.is_fetching_more = False
+            st.session_state.fetch_more_status = ""
+            st.session_state.fetch_more_step   = 0
+            if new_added == 0:
+                st.session_state.no_more_papers = True
+            else:
+                # Jump to the first page that now contains new papers.
+                # We use prev_total to decide which page to land on:
+                #   • If prev_total fills at least one full page, the new papers
+                #     start on a fresh page — jump there.
+                #   • If prev_total < _PAGE_SIZE (only 1 page existed), the new
+                #     papers are appended on that same page, but more pages may
+                #     now exist — jump to page 1 (index 1) if it now exists,
+                #     otherwise stay on page 0 so user sees the fuller page 1.
+                new_total = prev_total + new_added
+                new_total_pages = _math.ceil(new_total / _PAGE_SIZE)
+                if new_total_pages > 1:
+                    # If prev_total didn't fill the first page entirely, the
+                    # first truly *new* page is index 1; otherwise it's the
+                    # page that starts at prev_total.
+                    first_new_page = _math.ceil(prev_total / _PAGE_SIZE)
+                    # clamp to valid range
+                    st.session_state.paper_page = min(first_new_page, new_total_pages - 1)
+                else:
+                    st.session_state.paper_page = 0  # still only 1 page; stay
+            done = True
+            break
+        elif mtype == "fm_error":
+            st.session_state.is_fetching_more = False
+            st.session_state.fetch_more_status = ""
+            st.session_state.fetch_more_step   = 0
+            st.session_state.no_more_papers    = True
+            done = True
+            break
+
+    # ── Live progress box (renders every second while fetch is running) ─────────
+    if not done:
+        round_num   = st.session_state.get("fetch_round", 1)
+        step        = st.session_state.get("fetch_more_step", 0)
+        status_text = st.session_state.get("fetch_more_status", "Starting…")
+        total_steps = len(_PIPELINE_STEPS)
+        pct = min(int(step / total_steps * 100), 90)
+
+        st.markdown(
+            f'<div style="background:#0a1628;border:1px solid #2a4a7a;'
+            f'border-radius:12px;padding:0.8rem 1rem;margin-bottom:0.8rem">'
+            f'<div style="color:#74b9ff;font-weight:600;font-size:0.9rem;'
+            f'margin-bottom:0.4rem">'
+            f'🔍 Fetching more papers — round {round_num}…</div>'
+            f'<div style="color:#aaa;font-size:0.83rem;margin-bottom:0.5rem">'
+            f'{status_text}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.progress(pct, text=f"Step {step} of {total_steps}")
+
+        # Pipeline checklist (same step-dot style as the main progress panel)
+        memory_on = st.session_state.get("memory_enabled", False)
+        rows = ""
+        for i, (_, icon, label) in enumerate(_PIPELINE_STEPS):
+            is_mem = (i == len(_PIPELINE_STEPS) - 1)
+            if is_mem and not memory_on:
+                css, dot = "step-skip", "─"
+            elif i < step:
+                css, dot = "step-done",   "✅"
+            elif i == step:
+                css, dot = "step-active", "⏳"
+            else:
+                css, dot = "step-wait",   "⬜"
+            rows += (
+                f'<div class="step-row {css}">'
+                f'<span class="step-icon">{dot}</span>'
+                f'<span>{icon} {label}</span>'
+                f'</div>'
+            )
+        st.markdown(
+            f'<div style="background:#0a0a18;border:1px solid #2a2a4a;'
+            f'border-radius:12px;padding:0.7rem 1rem;margin-top:0.5rem">'
+            f'{rows}</div>',
+            unsafe_allow_html=True,
+        )
+
+    if done:
+        st.rerun()
 
 
 def _friendly_error(exc: Exception) -> str:
@@ -775,6 +1068,13 @@ def _progress_fragment():
                     clean_state = {k: v for k, v in state.items()
                                    if not k.startswith("_")}
                     st.session_state.research_state = clean_state
+                    # Accumulate ranked/synthesised papers into the global list.
+                    # This is what the pagination UI reads from, enabling
+                    # fetch-more rounds to append to the existing list.
+                    _append_papers_to_all(
+                        clean_state.get("synthesized_papers")
+                        or clean_state.get("ranked_papers", [])
+                    )
                     if st.session_state.memory_enabled:
                         st.session_state.session_id = clean_state.get(
                             "session_id", st.session_state.session_id
@@ -876,7 +1176,13 @@ def render_results(state: dict):
         st.error(f"❌ Error: {state['error']}")
         return
 
-    papers = state.get("synthesized_papers") or state.get("ranked_papers", [])
+    # Prefer the accumulated all_papers list (supports fetch-more rounds);
+    # fall back to the current state's papers for the very first render.
+    papers = (
+        st.session_state.get("all_papers")
+        or state.get("synthesized_papers")
+        or state.get("ranked_papers", [])
+    )
     insights = state.get("insights", {})
     intent = state.get("parsed_intent", {})
     memory_suggestions = state.get("memory_suggestions", [])
@@ -947,10 +1253,12 @@ def render_results(state: dict):
                 )
 
             # Apply filters and sort
+            # Papers with no year information are always included — excluding
+            # them based on a missing year would hide most fetched results.
             filtered = [
                 p for p in papers
                 if p.get("source", "") in src_filter
-                and (year_range[0] <= (p.get("year") or 0) <= year_range[1])
+                and (not p.get("year") or year_range[0] <= int(p.get("year")) <= year_range[1])
             ]
 
             if sort_by == "Year (newest)":
@@ -960,20 +1268,25 @@ def render_results(state: dict):
             # default: already sorted by relevance
 
             # ── Pagination ──────────────────────────────────────────────────
-            _PAGE_SIZE = 15
-
             import math as _math
+            _PAGE_SIZE = 15
             total_pages = max(1, _math.ceil(len(filtered) / _PAGE_SIZE))
 
-            # Initialise / clamp page index for this result set
+            # Initialise page index on first render
             if "paper_page" not in st.session_state:
                 st.session_state.paper_page = 0
+            # Clamp only if we've somehow gone beyond the known page count
+            # (do NOT clamp when we're at last page waiting for fetch-more).
             if st.session_state.paper_page >= total_pages:
                 st.session_state.paper_page = total_pages - 1
 
             _start = st.session_state.paper_page * _PAGE_SIZE
             _end   = _start + _PAGE_SIZE
             page_papers = filtered[_start:_end]
+            on_last_page = (st.session_state.paper_page >= total_pages - 1)
+
+            is_fetching_more = st.session_state.get("is_fetching_more", False)
+            no_more_papers   = st.session_state.get("no_more_papers", False)
 
             st.caption(
                 f"Showing {_start + 1}–{min(_end, len(filtered))} "
@@ -986,17 +1299,25 @@ def render_results(state: dict):
                 _render_paper_card(paper, i)
 
             # ── Prev / Next navigation bar ──────────────────────────────────
+            # Previous: always rendered; disabled on page 0.
+            # Next:     always rendered;
+            #   • on a non-last page  → advance
+            #   • on the last page    → trigger a new background search (fetch-more)
+            #   • while fetching      → show spinner instead
+            #   • no more papers      → disabled
             st.markdown("---")
             nav_l, nav_c, nav_r = st.columns([1, 2, 1])
+
             with nav_l:
-                if st.session_state.paper_page > 0:
-                    if st.button(
-                        "◀ Previous",
-                        key="prev_page_btn",
-                        use_container_width=True,
-                    ):
-                        st.session_state.paper_page -= 1
-                        st.rerun()
+                if st.button(
+                    "◀ Previous",
+                    key="prev_page_btn",
+                    disabled=(st.session_state.paper_page == 0),
+                    use_container_width=True,
+                ):
+                    st.session_state.paper_page -= 1
+                    st.rerun()
+
             with nav_c:
                 st.markdown(
                     f'<div style="text-align:center;color:#888;padding-top:0.35rem;">'
@@ -1004,15 +1325,41 @@ def render_results(state: dict):
                     f'of <b style="color:#a29bfe">{total_pages}</b></div>',
                     unsafe_allow_html=True,
                 )
+
             with nav_r:
-                if st.session_state.paper_page < total_pages - 1:
+                if is_fetching_more:
+                    st.markdown(
+                        '<div style="text-align:center;color:#a29bfe;'
+                        'padding-top:0.4rem;font-size:0.9rem">'
+                        '⏳ Fetching more…</div>',
+                        unsafe_allow_html=True,
+                    )
+                elif on_last_page and no_more_papers:
+                    st.button(
+                        "✅ All results shown",
+                        key="next_page_btn",
+                        disabled=True,
+                        use_container_width=True,
+                        help="No additional papers were found for this query.",
+                    )
+                else:
+                    next_label = "Next ▶  🔍 search more" if on_last_page else "Next ▶"
+                    next_help  = (
+                        "Runs a new search and appends fresh results to this list."
+                        if on_last_page else
+                        "Go to the next page of already-fetched results."
+                    )
                     if st.button(
-                        "Next ▶",
+                        next_label,
                         key="next_page_btn",
                         use_container_width=True,
+                        help=next_help,
                     ):
-                        st.session_state.paper_page += 1
-                        st.rerun()
+                        if on_last_page:
+                            _start_fetch_more()   # triggers new background search
+                        else:
+                            st.session_state.paper_page += 1
+                            st.rerun()
 
     # ── Tab 2: Insights ────────────────────────────────────────────────────
     with tab_insights:

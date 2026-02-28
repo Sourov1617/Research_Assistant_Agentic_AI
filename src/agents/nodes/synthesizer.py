@@ -15,7 +15,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
+from src.utils.json_utils import RobustJsonOutputParser
 
 if TYPE_CHECKING:
     from src.agents.state import ResearchState
@@ -80,7 +80,7 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
         model=state.get("llm_model"),
         temperature=state.get("llm_temperature"),
     )
-    chain = _SYNTH_PROMPT | llm | JsonOutputParser()
+    chain = _SYNTH_PROMPT | llm | RobustJsonOutputParser()
 
     synthesized = []
     total = len(papers)

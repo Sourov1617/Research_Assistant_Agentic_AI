@@ -100,6 +100,7 @@ def run_research_agent(
     year_max: Optional[int] = None,
     fast_mode: bool = False,
     enabled_sources: Optional[list] = None,
+    fetch_round: int = 0,
     stop_event=None,
 ) -> dict:
     """
@@ -139,6 +140,7 @@ def run_research_agent(
         "year_max": year_max,
         "fast_mode": fast_mode,
         "enabled_sources": enabled_sources,
+        "fetch_round": fetch_round,
         "_stop_event": stop_event,
         "parsed_intent": {},
         "search_plan": {},
@@ -180,6 +182,7 @@ def stream_research_agent(
     year_max: Optional[int] = None,
     fast_mode: bool = False,
     enabled_sources: Optional[list] = None,
+    fetch_round: int = 0,
     stop_event=None,
     agent_queue=None,
 ) -> Iterator[dict]:
@@ -207,6 +210,7 @@ def stream_research_agent(
         "year_max": year_max,
         "fast_mode": fast_mode,
         "enabled_sources": enabled_sources,
+        "fetch_round": fetch_round,
         "_stop_event": stop_event,
         "_agent_queue": agent_queue,
         "parsed_intent": {},

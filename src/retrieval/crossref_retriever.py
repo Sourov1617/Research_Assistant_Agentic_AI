@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 def search_crossref(
     query: str,
     max_results: Optional[int] = None,
+    offset: int = 0,
 ) -> list[dict]:
     """
     Search CrossRef by free-text query and return normalized paper dicts.
+    offset — number of results to skip (for fetch-more pagination).
     """
     limit = min(max_results or settings.MAX_PAPERS_PER_SOURCE, 100)
     results = []
@@ -29,6 +31,7 @@ def search_crossref(
     params: dict = {
         "query": query,
         "rows": limit,
+        "offset": offset,
         "sort": "relevance",
         "select": (
             "DOI,title,author,published,abstract,URL,"
