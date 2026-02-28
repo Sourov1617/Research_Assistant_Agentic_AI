@@ -23,88 +23,51 @@ CURRENT_YEAR = datetime.now().year
 _PLAN_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
-        """You are a specialist research librarian. Craft ONE maximally precise search
-query per source so every result is DIRECTLY relevant to the research topic.
+        """You are a research librarian. Output a JSON search plan.
 
-Rules for every query:
-- Combine: SPECIFIC_DOMAIN_TOPIC + SPECIFIC_METHODS + APPLICATION_AREA
-- NEVER use generic terms alone ("deep learning", "AI", "IoT") without the domain topic
-- Always pair method names with the topic (e.g., "sleep monitoring LSTM", not just "LSTM")
-- Use the most discriminating keywords from the intent
-- For site-specific web queries use: key_terms site:domain.com
+RULES:
+1. Each source has "query" (topic + methods) and "topic_query" (topic ONLY, NO model/optimizer names).
+2. Lead every query with topic/domain terms first (e.g. "IoT sleep monitoring wearable BiLSTM PSO").
+3. topic_query must NEVER contain model names (BiLSTM, GRU, CNN) or optimizer names (PSO, GWO).
+4. Web sources: append site:domain to each query.
 
-Return ONLY valid JSON (no markdown fences, no extra text):
+SOURCES and their site: targets:
+  arxiv, semantic_scholar, crossref, core — no site: needed
+  ieee_web          → site:ieeexplore.ieee.org
+  sciencedirect_web → site:sciencedirect.com
+  mdpi_web          → site:mdpi.com
+  nature_web        → site:nature.com
+  acm_web           → site:dl.acm.org
+  springer_web      → site:link.springer.com
+  pubmed_web        → site:pubmed.ncbi.nlm.nih.gov
+  openreview_web    → site:openreview.net
+
+EXAMPLE (intent: topic=IoT sleep monitoring, models=BiLSTM BiGRU, optims=PSO GWO):
+  arxiv.query        = "IoT sleep monitoring wearable BiLSTM BiGRU PSO GWO"
+  arxiv.topic_query  = "IoT sleep monitoring wearable sensor edge"
+  ieee_web.query     = "IoT sleep monitoring BiLSTM PSO site:ieeexplore.ieee.org"
+  ieee_web.topic_query = "IoT sleep monitoring wearable sensor site:ieeexplore.ieee.org"
+
+OUTPUT — valid JSON only, no markdown fences:
 {{
   "sources": {{
-    "arxiv": {{
-      "enabled": true,
-      "query": "<single precise arxiv query>",
-      "categories": ["cs.LG", "eess.SP"]
-    }},
-    "semantic_scholar": {{
-      "enabled": true,
-      "query": "<single precise S2 query>"
-    }},
-    "crossref": {{
-      "enabled": true,
-      "query": "<single precise CrossRef query>"
-    }},
-    "core": {{
-      "enabled": true,
-      "query": "<single precise CORE query>"
-    }},
-    "ieee_web": {{
-      "enabled": true,
-      "query": "<topic_terms> site:ieeexplore.ieee.org"
-    }},
-    "sciencedirect_web": {{
-      "enabled": true,
-      "query": "<topic_terms> site:sciencedirect.com"
-    }},
-    "mdpi_web": {{
-      "enabled": true,
-      "query": "<topic_terms> site:mdpi.com"
-    }},
-    "nature_web": {{
-      "enabled": true,
-      "query": "<topic_terms> site:nature.com OR site:springer.com"
-    }},
-    "acm_web": {{
-      "enabled": true,
-      "query": "<topic_terms> site:dl.acm.org"
-    }},
-    "springer_web": {{
-      "enabled": true,
-      "query": "<topic_terms> site:link.springer.com"
-    }},
-    "pubmed_web": {{
-      "enabled": true,
-      "query": "<topic_terms> site:pubmed.ncbi.nlm.nih.gov"
-    }},
-    "openreview_web": {{
-      "enabled": true,
-      "query": "<topic_terms> site:openreview.net"
-    }}
+    "arxiv":            {{"enabled": true, "query": "...", "topic_query": "...", "categories": ["cs.LG","eess.SP"]}},
+    "semantic_scholar": {{"enabled": true, "query": "...", "topic_query": "..."}},
+    "crossref":         {{"enabled": true, "query": "...", "topic_query": "..."}},
+    "core":             {{"enabled": true, "query": "...", "topic_query": "..."}},
+    "ieee_web":         {{"enabled": true, "query": "...", "topic_query": "..."}},
+    "sciencedirect_web":{{"enabled": true, "query": "...", "topic_query": "..."}},
+    "mdpi_web":         {{"enabled": true, "query": "...", "topic_query": "..."}},
+    "nature_web":       {{"enabled": true, "query": "...", "topic_query": "..."}},
+    "acm_web":          {{"enabled": true, "query": "...", "topic_query": "..."}},
+    "springer_web":     {{"enabled": true, "query": "...", "topic_query": "..."}},
+    "pubmed_web":       {{"enabled": false, "query": "...", "topic_query": "..."}},
+    "openreview_web":   {{"enabled": true, "query": "...", "topic_query": "..."}}
   }},
-  "primary_keywords": ["kw1", "kw2", "kw3", "kw4", "kw5"],
+  "primary_keywords": ["kw1","kw2","kw3","kw4","kw5"],
   "year_after": {year_after},
-  "rationale": "one sentence explaining the strategy"
-}}
-
-EXAMPLE for query "IoT sleep monitoring with BiLSTM GRU PSO optimizer":
-  arxiv             : "sleep monitoring IoT wearable BiLSTM GRU deep learning EEG"
-  semantic_scholar  : "IoT sleep staging deep learning LSTM GRU wearable sensor"
-  crossref          : "IoT sleep monitoring deep learning optimization"
-  core              : "sleep apnea detection IoT LSTM GRU wearable"
-  ieee_web          : "IoT sleep monitoring LSTM deep learning site:ieeexplore.ieee.org"
-  sciencedirect_web : "sleep detection IoT deep learning BiLSTM site:sciencedirect.com"
-  mdpi_web          : "wearable sleep quality deep learning IoT site:mdpi.com"
-  nature_web        : "sleep monitoring neural network wearable device site:nature.com"
-  acm_web           : "sleep monitoring deep learning wearable IoT site:dl.acm.org"
-  springer_web      : "sleep quality monitoring neural network IoT site:link.springer.com"
-  pubmed_web        : "sleep disorder detection wearable sensor machine learning site:pubmed.ncbi.nlm.nih.gov"
-  openreview_web    : "sleep monitoring deep learning wearable site:openreview.net"
-  NOT acceptable    : "deep learning optimization IoT"  (too vague)""",
+  "rationale": "one sentence"
+}}""",
     ),
     (
         "human",

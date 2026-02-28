@@ -70,9 +70,35 @@ def rank_sources_node(state: "ResearchState") -> "ResearchState":
         return {**state, "ranked_papers": [],
                 "status_message": "⚠️ No papers to rank."}
 
-    keywords = intent.get("keywords", [])
-    keywords += plan.get("primary_keywords", [])
-    keywords = list(dict.fromkeys(k.lower() for k in keywords if k))
+    # Split keywords into two pools:
+    #   topic_kws   — what the paper must be ABOUT (application domain, subject)
+    #   method_kws  — techniques it should USE (model names, optimizers, algorithms)
+    #
+    # This split allows two-tier scoring: topic match is a gate (papers that
+    # don't cover the subject domain at all are capped near zero regardless
+    # of how many method terms they contain), method match is an additive boost.
+    topic_kws = list(dict.fromkeys(
+        k.lower() for k in (
+            intent.get("topic_keywords", [])
+            + ([intent.get("primary_topic", "")] if intent.get("primary_topic") else [])
+            + ([intent.get("application_area", "")] if intent.get("application_area") else [])
+            + intent.get("platforms", [])
+            + intent.get("sub_domains", [])
+        )
+        if k
+    ))
+    method_kws = list(dict.fromkeys(
+        k.lower() for k in (
+            intent.get("method_keywords", [])
+            + intent.get("named_models", [])
+            + intent.get("named_optimizers", [])
+            + intent.get("methods", [])
+            + intent.get("discriminating_terms", [])
+            + intent.get("keywords", [])
+            + plan.get("primary_keywords", [])
+        )
+        if k
+    ))
 
     date_filter_year = plan.get("date_filter_year", 0)
     max_ranked = settings.MAX_RANKED_PAPERS
@@ -80,7 +106,7 @@ def rank_sources_node(state: "ResearchState") -> "ResearchState":
 
     scored = []
     for paper in papers:
-        score = _score_paper(paper, keywords, date_filter_year)
+        score = _score_paper(paper, topic_kws, method_kws, date_filter_year)
         paper["relevance_score"] = round(score, 4)
         scored.append(paper)
 
@@ -105,40 +131,91 @@ def rank_sources_node(state: "ResearchState") -> "ResearchState":
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
-def _score_paper(paper: dict, keywords: list[str], date_filter_year: int) -> float:
+def _score_paper(paper: dict, topic_kws: list[str], method_kws: list[str], date_filter_year: int) -> float:
     weights = {
-        "relevance": 0.40,
-        "recency": 0.30,
-        "citations": 0.20,
+        "relevance":   0.55,   # increased — topic+method relevance is the primary signal
+        "recency":     0.20,   # decreased — don't let new-but-irrelevant papers win
+        "citations":   0.15,   # decreased — don't let old famous papers crowd out on-topic papers
         "credibility": 0.10,
     }
 
-    relevance = _keyword_relevance(paper, keywords)
-    recency = _recency_score(paper.get("year"), date_filter_year)
-    citations = _citation_score(paper.get("citation_count"))
+    relevance   = _keyword_relevance(paper, topic_kws, method_kws)
+
+    # Hard gate: _keyword_relevance returns 0.04 as the "off-topic" sentinel.
+    # Short-circuit here so recency + citations + credibility cannot compensate.
+    # 0.04 < MIN_RELEVANCE_SCORE (0.05) → paper is always filtered out.
+    if relevance <= 0.04 and topic_kws:
+        return relevance
+
+    recency     = _recency_score(paper.get("year"), date_filter_year)
+    citations   = _citation_score(paper.get("citation_count"))
     credibility = SOURCE_CREDIBILITY.get(paper.get("source", ""), 0.5)
 
     score = (
-        weights["relevance"] * relevance
-        + weights["recency"] * recency
-        + weights["citations"] * citations
+        weights["relevance"]   * relevance
+        + weights["recency"]     * recency
+        + weights["citations"]   * citations
         + weights["credibility"] * credibility
     )
     return min(score, 1.0)
 
 
-def _keyword_relevance(paper: dict, keywords: list[str]) -> float:
-    if not keywords:
-        return 0.5
+def _keyword_relevance(paper: dict, topic_kws: list[str], method_kws: list[str]) -> float:
+    """
+    Two-tier relevance scoring.
 
+    Tier 1 — TOPIC GATE (65% of score):
+        Does the paper cover the required subject/application domain?
+        If ZERO topic terms match the paper is Off-Topic and capped at 0.04 —
+        it will fall below MIN_RELEVANCE_SCORE and be filtered out.
+        This prevents generic DL papers from outranking on-topic papers that
+        happen to match fewer method keywords.
+
+    Tier 2 — METHOD BOOST (35% of score):
+        How many of the requested techniques (models, optimizers) does the
+        paper mention?  Adds on top of the topic score.
+
+    When no topic keywords are available (e.g. simple keyword query / fallback
+    intent) we fall back to treating all keywords equally.
+    """
     text = " ".join([
         str(paper.get("title") or ""),
         str(paper.get("abstract") or ""),
         " ".join(str(a) for a in (paper.get("authors") or [])),
     ]).lower()
 
-    matches = sum(1 for kw in keywords if re.search(r"\b" + re.escape(kw) + r"\b", text))
-    return min(matches / max(len(keywords), 1), 1.0)
+    # ── Tier 1: topic gate ────────────────────────────────────────────────────
+    if topic_kws:
+        topic_hits = sum(
+            1 for kw in topic_kws
+            if re.search(r"\b" + re.escape(kw) + r"\b", text)
+        )
+        topic_score = topic_hits / len(topic_kws)
+
+        # Hard gate: zero topic matches → off-topic, nearly zero relevance.
+        # The paper might be technically excellent but it's about the wrong subject.
+        if topic_hits == 0:
+            return 0.04
+    else:
+        # No topic information — fall back to flat keyword scoring
+        all_kws = list(dict.fromkeys(topic_kws + method_kws))
+        if not all_kws:
+            return 0.5
+        hits = sum(1 for kw in all_kws if re.search(r"\b" + re.escape(kw) + r"\b", text))
+        return min(hits / len(all_kws), 1.0)
+
+    # ── Tier 2: method boost ──────────────────────────────────────────────────
+    if method_kws:
+        method_hits = sum(
+            1 for kw in method_kws
+            if re.search(r"\b" + re.escape(kw) + r"\b", text)
+        )
+        method_score = min(method_hits / len(method_kws), 1.0)
+    else:
+        method_score = topic_score  # no method info → use topic score only
+
+    # Topic is primary (65%), methods are secondary (35%)
+    return min(topic_score * 0.65 + method_score * 0.35, 1.0)
 
 
 def _recency_score(year, date_filter_year: int) -> float:

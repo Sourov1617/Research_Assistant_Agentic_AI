@@ -635,7 +635,7 @@ def _start_agent(query: str):
     st.session_state.agent_stopped      = False
     st.session_state.is_running         = True
     st.session_state.research_state     = None
-    st.session_state.papers_shown       = 15  # reset pagination for new query
+    st.session_state.paper_page         = 0   # reset to first page for new query
 
     cfg = dict(
         query=query,
@@ -959,34 +959,60 @@ def render_results(state: dict):
                 filtered.sort(key=lambda p: p.get("citation_count") or 0, reverse=True)
             # default: already sorted by relevance
 
-            st.caption(f"Showing {len(filtered)} of {len(papers)} papers")
+            # ── Pagination ──────────────────────────────────────────────────
+            _PAGE_SIZE = 15
 
-            # Pagination — initialise per-query counter
-            if "papers_shown" not in st.session_state:
-                st.session_state.papers_shown = 15
+            import math as _math
+            total_pages = max(1, _math.ceil(len(filtered) / _PAGE_SIZE))
 
-            page_papers = filtered[: st.session_state.papers_shown]
+            # Initialise / clamp page index for this result set
+            if "paper_page" not in st.session_state:
+                st.session_state.paper_page = 0
+            if st.session_state.paper_page >= total_pages:
+                st.session_state.paper_page = total_pages - 1
+
+            _start = st.session_state.paper_page * _PAGE_SIZE
+            _end   = _start + _PAGE_SIZE
+            page_papers = filtered[_start:_end]
+
+            st.caption(
+                f"Showing {_start + 1}–{min(_end, len(filtered))} "
+                f"of {len(filtered)} papers  "
+                f"(page {st.session_state.paper_page + 1} of {total_pages})"
+            )
 
             # Paper cards
-            for i, paper in enumerate(page_papers, 1):
+            for i, paper in enumerate(page_papers, _start + 1):
                 _render_paper_card(paper, i)
 
-            # Load More button
-            remaining = len(filtered) - len(page_papers)
-            if remaining > 0:
-                st.markdown("---")
-                lcol, mcol, rcol = st.columns([1, 2, 1])
-                with mcol:
+            # ── Prev / Next navigation bar ──────────────────────────────────
+            st.markdown("---")
+            nav_l, nav_c, nav_r = st.columns([1, 2, 1])
+            with nav_l:
+                if st.session_state.paper_page > 0:
                     if st.button(
-                        f"📄 Load more ({remaining} remaining)",
+                        "◀ Previous",
+                        key="prev_page_btn",
                         use_container_width=True,
-                        key="load_more_btn",
                     ):
-                        st.session_state.papers_shown += 15
+                        st.session_state.paper_page -= 1
                         st.rerun()
-            else:
-                if len(filtered) > 15:
-                    st.caption(f"✅ All {len(filtered)} papers shown")
+            with nav_c:
+                st.markdown(
+                    f'<div style="text-align:center;color:#888;padding-top:0.35rem;">'
+                    f'Page <b style="color:#a29bfe">{st.session_state.paper_page + 1}</b> '
+                    f'of <b style="color:#a29bfe">{total_pages}</b></div>',
+                    unsafe_allow_html=True,
+                )
+            with nav_r:
+                if st.session_state.paper_page < total_pages - 1:
+                    if st.button(
+                        "Next ▶",
+                        key="next_page_btn",
+                        use_container_width=True,
+                    ):
+                        st.session_state.paper_page += 1
+                        st.rerun()
 
     # ── Tab 2: Insights ────────────────────────────────────────────────────
     with tab_insights:

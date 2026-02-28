@@ -106,8 +106,10 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
     fast_mode = bool(state.get("fast_mode", False))
     stop_event = state.get("_stop_event")  # threading.Event or None
 
-    # Single wall-clock budget for ALL parallel threads
-    thread_timeout = 10 if fast_mode else 25
+    # Single wall-clock budget for ALL parallel threads.
+    # Increased to 45s (normal) to accommodate the _DDGS_SEMAPHORE in
+    # web_retriever which may queue a thread briefly before it can proceed.
+    thread_timeout = 15 if fast_mode else 45
 
     all_papers: list[dict] = []
     lock = threading.Lock()
@@ -115,7 +117,7 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
     errors: list[str] = []
     source_counts: dict[str, int] = {}
 
-    def _run(src_name: str, fn, query: str):
+    def _run(src_name: str, fn, query: str, fallback_query: str = ""):
         # Small delay for rate-limited sources (skip in fast mode)
         delay = 0.0 if fast_mode else _RATE_LIMIT_DELAY.get(src_name, 0)
         if delay:
@@ -133,9 +135,26 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
         try:
             results = fn(query, max_results=limit)
         except Exception as exc:
-            logger.error("Source '%s' failed: %s", src_name, exc)
+            logger.warning("Source '%s' primary query failed: %s", src_name, exc)
             with lock:
                 errors.append(f"{src_name}: {exc}")
+
+        # Sequential topic-query fallback: run only when primary returned nothing.
+        # This avoids doubling the number of concurrent DDGS calls (which causes
+        # rate-limiting) while still fetching on-topic results when the
+        # method-specific primary query is too narrow.
+        if not results and fallback_query and fallback_query.strip() != query.strip():
+            if stop_event and stop_event.is_set():
+                return
+            try:
+                results = fn(fallback_query, max_results=limit)
+                if results:
+                    logger.info("Source '%s': fallback query returned %d results",
+                                src_name, len(results))
+            except Exception as exc:
+                logger.warning("Source '%s' fallback query failed: %s", src_name, exc)
+
+        if not results:
             return
 
         with lock:
@@ -165,9 +184,22 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
         if not query:
             continue
 
-        t = threading.Thread(target=_run, args=(src_name, fn, query), daemon=True)
+        topic_query = src_cfg.get("topic_query") or ""
+        t = threading.Thread(
+            target=_run,
+            args=(src_name, fn, query, topic_query),
+            daemon=True,
+        )
         threads.append(t)
         t.start()
+
+        # topic_query is run as a SEQUENTIAL fallback inside the same thread,
+        # not as an extra parallel thread.  Firing 16 simultaneous DDGS calls
+        # (8 sources × 2 queries) saturates the DuckDuckGo backend and causes
+        # "No results found" on every call.  Instead we fire one thread per
+        # source, and that thread tries the topic_query only when the main
+        # query returns nothing.  This is handled inside the _run_with_fallback
+        # wrapper below.
 
     # ── Single wall-clock deadline join ───────────────────────────────────────
     # All threads share ONE deadline instead of each getting a fresh timeout.

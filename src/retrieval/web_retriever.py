@@ -16,14 +16,22 @@ DuckDuckGo notes
 * We additionally wrap the whole call in a thread + hard outer deadline to
   guarantee we never block longer than _DDGS_HARD_TIMEOUT seconds regardless
   of OS-level TLS-handshake stalls (a known issue on Windows with primp).
-* site: operators in the query work fine with DuckDuckGo, so all publisher
-  sources (IEEE, ScienceDirect, MDPI, Nature, ACM, Springer, PubMed…) are
-  still searchable via the DDG fallback.
+* site: operators are STRIPPED from queries before passing to DDGS —
+  the ddgs 9.x duckduckgo HTML backend scrapes specific XPath selectors that
+  break when site: changes the DuckDuckGo response page structure, causing
+  "No results found" on every single call.  We strip site: from the query,
+  do a general search, then post-filter results by domain URL (best-effort).
+  If domain filtering removes all results, the unfiltered results are returned
+  so the user always gets something.
+* A module-level semaphore caps concurrent DDGS calls at 4 to prevent
+  rate-limiting when many web sources are enabled simultaneously.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import logging
+import re
+import threading
 from typing import Optional
 
 from config import settings
@@ -31,9 +39,11 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 # Hard outer timeout for the DuckDuckGo fallback.
-# Even if primp's socket timeout fails to fire (Windows TLS-handshake stall),
-# the thread future will be abandoned after this many seconds.
 _DDGS_HARD_TIMEOUT = 20  # seconds
+
+# Max concurrent DDGS calls across ALL threads — prevents rate-limiting when
+# many web sources fire simultaneously.
+_DDGS_SEMAPHORE = threading.Semaphore(4)
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -108,6 +118,29 @@ def _search_tavily(
         return []
 
 
+# ── DuckDuckGo helpers ────────────────────────────────────────────────────────
+
+def _strip_site_operator(query: str) -> tuple[str, list[str]]:
+    """
+    Remove ``site:example.com`` fragments from *query*.
+
+    Returns
+    -------
+    clean_query : str
+        The query with all ``site:`` fragments removed and whitespace normalised.
+    domains : list[str]
+        The domain strings extracted from the ``site:`` operators (e.g.
+        ``["ieeexplore.ieee.org"]``).  Used for best-effort post-filtering of
+        results after the DDGS call.
+    """
+    # Match site:<domain> — domain is a run of non-whitespace chars
+    site_pattern = re.compile(r'\bsite:\S+', re.IGNORECASE)
+    domains = [m.group(0)[5:].lower() for m in site_pattern.finditer(query)]
+    clean = site_pattern.sub('', query)
+    clean = re.sub(r'\s{2,}', ' ', clean).strip()
+    return clean, domains
+
+
 # ── DuckDuckGo ────────────────────────────────────────────────────────────────
 
 def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
@@ -138,43 +171,86 @@ def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
             return []
 
     def _run() -> list[dict]:
-        # timeout=10 → hard socket timeout per HTTP request inside primp
-        # backend="duckduckgo" → single engine, no multi-engine fan-out
-        with DDGS(timeout=10) as ddgs:
-            raw = ddgs.text(
-                query,
-                max_results=max_results,
-                safesearch="moderate",
-                backend="duckduckgo",
-            )
-        return [
+        # Strip site: operator — DDGS duckduckgo backend HTML parser breaks on it
+        clean_query, domains = _strip_site_operator(query)
+        if not clean_query:
+            clean_query = query  # safety: if stripping ate everything, use original
+
+        # Fetch more than needed when we'll domain-filter afterwards
+        fetch_limit = max_results * 3 if domains else max_results
+
+        def _ddgs_fetch(q: str, limit: int) -> list:
+            """Single DDGS call, returns raw list or [] on any failure."""
+            with _DDGS_SEMAPHORE:  # cap concurrent connections
+                with DDGS(timeout=10) as ddgs:
+                    return ddgs.text(
+                        q,
+                        max_results=limit,
+                        safesearch="moderate",
+                        backend="duckduckgo",
+                    ) or []
+
+        # --- Attempt 1: full (site:-stripped) query ---
+        raw: list = []
+        try:
+            raw = _ddgs_fetch(clean_query, fetch_limit)
+        except Exception as exc:
+            no_results = "no results" in str(exc).lower()
+            if not no_results:
+                logger.warning("DuckDuckGo attempt 1 failed (%s): %s", type(exc).__name__, exc)
+            # --- Attempt 2: simplified (first 6 words) ---
+            words = clean_query.split()
+            simplified = " ".join(words[:6])
+            if len(words) > 6:
+                try:
+                    raw = _ddgs_fetch(simplified, max_results)
+                except Exception as exc2:
+                    if "no results" not in str(exc2).lower():
+                        logger.warning("DuckDuckGo attempt 2 failed: %s", exc2)
+
+        if not raw:
+            return []
+
+        # Normalise raw results (field names differ between ddgs versions)
+        results = [
             _normalize_web_result(
-                # ddgs 9.x returns dicts with 'title', 'href', 'body'
-                # older duckduckgo_search used 'title', 'href', 'body' too
-                {"title": r.get("title", ""),
-                 "url":   r.get("href", r.get("url", "")),
+                {"title":   r.get("title", ""),
+                 "url":     r.get("href", r.get("url", "")),
                  "content": r.get("body", r.get("content", "")),
-                 "score": 0.0},
+                 "score":   0.0},
                 source="DuckDuckGo",
             )
-            for r in (raw or [])
+            for r in raw
         ]
+
+        # Best-effort domain filter: keep only results from the target domain(s)
+        if domains:
+            filtered = [
+                r for r in results
+                if any(d in (r.get("url") or "").lower() for d in domains)
+            ]
+            # If the filter removed everything, return unfiltered results
+            # (better than nothing — the ranker will score them lower anyway)
+            if filtered:
+                return filtered[:max_results]
+
+        return results[:max_results]
 
     # Hard outer deadline — cannot hang longer than _DDGS_HARD_TIMEOUT seconds
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
         future = ex.submit(_run)
         try:
             results = future.result(timeout=_DDGS_HARD_TIMEOUT)
-            logger.info("DuckDuckGo returned %d results for: %s", len(results), query)
+            logger.info("DuckDuckGo returned %d results for: %s", len(results), query[:80])
             return results
         except concurrent.futures.TimeoutError:
             logger.warning(
                 "DuckDuckGo timed out after %ds for query: %s",
-                _DDGS_HARD_TIMEOUT, query,
+                _DDGS_HARD_TIMEOUT, query[:80],
             )
             return []
         except Exception as exc:
-            logger.error("DuckDuckGo search failed: %s", exc)
+            logger.warning("DuckDuckGo search failed: %s", exc)
             return []
 
 
