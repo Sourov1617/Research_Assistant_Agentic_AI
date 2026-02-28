@@ -20,6 +20,52 @@ from src.utils.ollama_utils import is_ollama_running, list_ollama_models
 logger = logging.getLogger(__name__)
 
 
+# ── Provider validation ───────────────────────────────────────────────────────
+
+def _is_provider_configured(p: str) -> bool:
+    """Return True if the provider has a real (non-placeholder) API key."""
+    if p == "openai":
+        k = settings.OPENAI_API_KEY
+        return bool(k) and "your_" not in k and k != ""
+    if p == "openrouter":
+        k = settings.OPENROUTER_API_KEY
+        return bool(k) and "your_" not in k and k != ""
+    if p == "gemini":
+        k = settings.GOOGLE_API_KEY
+        return bool(k) and "your_" not in k and k != ""
+    if p == "anthropic":
+        k = settings.ANTHROPIC_API_KEY
+        return bool(k) and "your_" not in k and k != ""
+    if p == "ollama":
+        return is_ollama_running()
+    return False
+
+
+def _resolve_provider(requested: str) -> str:
+    """
+    Return the requested provider if its key is configured, otherwise return
+    the first available provider in priority order.
+    """
+    priority = [requested, "openrouter", "gemini", "anthropic", "ollama", "openai"]
+    seen: set[str] = set()
+    for p in priority:
+        if p in seen or p not in {"openai", "openrouter", "gemini", "anthropic", "ollama"}:
+            continue
+        seen.add(p)
+        if _is_provider_configured(p):
+            if p != requested:
+                logger.warning(
+                    "LLM provider '%s' is not configured (placeholder key?). "
+                    "Auto-switching to '%s'.", requested, p
+                )
+            return p
+    logger.error(
+        "No LLM provider is properly configured! Tried: %s. "
+        "Check your .env file.", list(seen)
+    )
+    return requested  # fall through — will fail with a clear auth error
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def get_llm(
@@ -29,6 +75,8 @@ def get_llm(
 ) -> BaseChatModel:
     """
     Return a LangChain chat model for the requested provider.
+    If the configured provider has no valid API key, automatically falls back
+    to the first properly-configured provider so searches never get stuck.
 
     Parameters
     ----------
@@ -55,6 +103,13 @@ def get_llm(
             "Unknown provider '%s'. Falling back to 'openai'.", _provider
         )
         _provider = "openai"
+
+    # Only auto-resolve when NO provider was explicitly requested (i.e. using
+    # the .env default). When the user picks a provider in the sidebar, honour
+    # it exactly — never silently swap it out. If it is misconfigured the
+    # builder will raise a clear authentication / connection error.
+    if provider is None:
+        _provider = _resolve_provider(_provider)
 
     return builders[_provider](model=model, temperature=_temp)
 
@@ -98,14 +153,15 @@ def get_available_models(provider: Optional[str] = None) -> list[str]:
             "deepseek/deepseek-r1:free",
             "anthropic/claude-3-haiku",
             "openai/gpt-4o-mini",
+            "qwen/qwen3-235b-a22b:free",
+            "qwen/qwen3-30b-a3b:free",
+            "qwen/qwen3-vl-235b-a22b-thinking",
+            "qwen/qwen3-vl-30b-a3b-thinking",
             "stepfun/step-3.5-flash:free",
             "arcee-ai/trinity-large-preview:free",
             "upstage/solar-pro-3:free",
-            "qwen/qwen3-vl-235b-a22b-thinking",
-            "qwen/qwen3-vl-30b-a3b-thinking",
             "openai/gpt-oss-120b:free",
             "openai/gpt-oss-20b:free",
-            "qwen/qwen3-vl-30b-a3b-thinking",
         ]
     if _p == "gemini":
         return [
@@ -135,6 +191,8 @@ def _build_openai(model: Optional[str], temperature: float) -> BaseChatModel:
         temperature=temperature,
         api_key=settings.OPENAI_API_KEY,
         base_url=settings.OPENAI_BASE_URL,
+        timeout=180,    # 3 min max — prevents indefinite HTTP hang
+        max_retries=1,  # fail fast rather than retry a broken key
     )
 
 
@@ -146,6 +204,8 @@ def _build_openrouter(model: Optional[str], temperature: float) -> BaseChatModel
         temperature=temperature,
         api_key=settings.OPENROUTER_API_KEY,
         base_url=settings.OPENROUTER_BASE_URL,
+        timeout=180,    # 3 min max for large/thinking models
+        max_retries=1,
         default_headers={
             "HTTP-Referer": "https://research-agent.local",
             "X-Title": "Research Discovery Agent",
@@ -160,6 +220,7 @@ def _build_gemini(model: Optional[str], temperature: float) -> BaseChatModel:
         model=model or settings.GEMINI_DEFAULT_MODEL,
         temperature=temperature,
         google_api_key=settings.GOOGLE_API_KEY,
+        # Gemini client timeout is handled by the polling loop in each node
     )
 
 
@@ -170,6 +231,7 @@ def _build_anthropic(model: Optional[str], temperature: float) -> BaseChatModel:
         model=model or settings.ANTHROPIC_DEFAULT_MODEL,
         temperature=temperature,
         api_key=settings.ANTHROPIC_API_KEY,
+        timeout=180,
     )
 
 

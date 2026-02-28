@@ -5,7 +5,7 @@ structured research intent dictionary.
 """
 from __future__ import annotations
 
-import json
+import concurrent.futures
 import logging
 import re
 from typing import TYPE_CHECKING
@@ -64,14 +64,52 @@ def parse_query_node(state: "ResearchState") -> "ResearchState":
     llm = get_llm(
         provider=state.get("llm_provider"),
         model=state.get("llm_model"),
+        temperature=state.get("llm_temperature"),
     )
     chain = _PARSE_PROMPT | llm | JsonOutputParser()
+    stop_event = state.get("_stop_event")
 
+    # Push a live status update so the UI shows activity immediately,
+    # before we even start the (potentially slow) LLM call.
+    _q = state.get("_agent_queue")
+    if _q:
+        _q.put({"_type": "interim",
+                "status_message": "\U0001f9e0 LLM analysing research intent\u2026"})
+
+    # Run LLM in a thread with a hard timeout so a completely broken provider
+    # never hangs the pipeline (and stop_event can cancel it quickly).
+    # 120 s is generous enough for large reasoning models (qwen 235B, etc.).
+    #
+    # IMPORTANT: do NOT use 'with ThreadPoolExecutor() as ex:' here — that
+    # context manager calls shutdown(wait=True) on exit, which blocks until the
+    # spawned thread finishes even after we've already timed out.  Instead we
+    # call shutdown(wait=False) explicitly so the hung thread is discarded and
+    # execution continues immediately.
+    _LLM_TIMEOUT = 120  # seconds
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(chain.invoke, {"query": query})
     try:
-        intent = chain.invoke({"query": query})
+        # Poll so stop_event can abort during the wait
+        deadline = _LLM_TIMEOUT
+        while deadline > 0:
+            if stop_event and stop_event.is_set():
+                logger.info("Query parsing cancelled by stop_event.")
+                executor.shutdown(wait=False)
+                return {**state, "parsed_intent": _fallback_intent(query),
+                        "status_message": "🛑 Search stopped."}
+            try:
+                intent = future.result(timeout=min(1.0, deadline))
+                break
+            except concurrent.futures.TimeoutError:
+                deadline -= 1.0
+        else:
+            logger.warning("Query parsing timed out after %ss — using fallback.", _LLM_TIMEOUT)
+            intent = _fallback_intent(query)
     except Exception as exc:
         logger.error("Query parsing failed: %s", exc)
         intent = _fallback_intent(query)
+    finally:
+        executor.shutdown(wait=False)  # never block on a hung LLM thread
 
     logger.info("Parsed intent: domain=%s, keywords=%s",
                 intent.get("domain", "N/A"),

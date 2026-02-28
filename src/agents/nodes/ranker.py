@@ -26,10 +26,28 @@ CURRENT_YEAR = datetime.now().year
 
 # Credibility weights per source
 SOURCE_CREDIBILITY = {
+    # Curated academic databases
     "Semantic Scholar": 0.95,
     "arXiv": 0.90,
     "CrossRef": 0.88,
     "CORE": 0.85,
+    # Top-tier journals / publishers (web-scraped)
+    "IEEE Xplore": 0.95,
+    "Elsevier": 0.93,
+    "ScienceDirect": 0.93,
+    "Nature": 0.97,
+    "Springer": 0.92,
+    "MDPI": 0.88,
+    "ACM Digital Library": 0.93,
+    "PubMed": 0.92,
+    "OpenReview": 0.91,  # NeurIPS / ICLR / ICML pre-prints with reviews
+    # Conference proceedings (web-scraped)
+    "CVPR": 0.94,
+    "NeurIPS": 0.96,
+    "ICML": 0.95,
+    "AAAI": 0.93,
+    "ICCV": 0.94,
+    # Generic web search fallbacks
     "Tavily": 0.60,
     "DuckDuckGo": 0.50,
 }

@@ -9,6 +9,7 @@ Analyzes all synthesized papers collectively to produce:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -105,17 +106,46 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
     llm = get_llm(
         provider=state.get("llm_provider"),
         model=state.get("llm_model"),
+        temperature=state.get("llm_temperature"),
     )
     chain = _INSIGHT_PROMPT | llm | JsonOutputParser()
+    stop_event = state.get("_stop_event")
 
+    # Push live status immediately.
+    _q = state.get("_agent_queue")
+    if _q:
+        _q.put({"_type": "interim",
+                "status_message": "\U0001f52c LLM generating research insights\u2026"})
+
+    # Non-blocking executor so a hung LLM call never freezes the pipeline.
+    _INSIGHT_TIMEOUT = 120
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        chain.invoke,
+        {"research_goal": research_goal,
+         "papers_json": json.dumps(paper_summaries, indent=2)},
+    )
     try:
-        insights = chain.invoke({
-            "research_goal": research_goal,
-            "papers_json": json.dumps(paper_summaries, indent=2),
-        })
+        deadline = _INSIGHT_TIMEOUT
+        while deadline > 0:
+            if stop_event and stop_event.is_set():
+                logger.info("Insight generation cancelled by stop_event.")
+                executor.shutdown(wait=False)
+                return {**state, "insights": _fallback_insights(papers),
+                        "status_message": "\U0001f6d1 Search stopped."}
+            try:
+                insights = future.result(timeout=min(1.0, deadline))
+                break
+            except concurrent.futures.TimeoutError:
+                deadline -= 1.0
+        else:
+            logger.warning("Insight generation timed out after %ss \u2014 using fallback.", _INSIGHT_TIMEOUT)
+            insights = _fallback_insights(papers)
     except Exception as exc:
         logger.error("Insight generation failed: %s", exc)
         insights = _fallback_insights(papers)
+    finally:
+        executor.shutdown(wait=False)  # never block on a hung LLM thread
 
     logger.info("Insights generated: %d trends, %d gaps",
                 len(insights.get("emerging_trends", [])),

@@ -8,12 +8,26 @@ import sys
 import os
 import time
 import uuid
+import queue
+import threading
+import traceback
 from pathlib import Path
 
 # Ensure project root is on the path
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# ── Compatibility shim ────────────────────────────────────────────────────────
+# langchain-core ≥0.3.x reads langchain.debug / langchain.verbose as part of a
+# backwards-compat shim, but langchain ≥1.x removed those module-level attrs.
+# Inject them before any LangChain sub-package is imported so the AttributeError
+# ('module langchain has no attribute debug') never occurs.
+import langchain as _lc
+if not hasattr(_lc, "debug"):
+    _lc.debug = False
+if not hasattr(_lc, "verbose"):
+    _lc.verbose = False
 
 import streamlit as st
 
@@ -38,69 +52,183 @@ st.set_page_config(
 # ── Custom CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* Main container */
-.block-container { padding-top: 1.5rem; }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-/* Paper cards */
+/* ─── Base ─────────────────────────────────────────────────── */
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.block-container { padding-top: 1rem; max-width: 1100px; }
+
+/* ─── Hero Header ──────────────────────────────────────────── */
+.hero-header {
+    background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 50%, #0d1b2a 100%);
+    border: 1px solid #2a2a5a;
+    border-radius: 16px;
+    padding: 1.8rem 2rem;
+    margin-bottom: 1.5rem;
+    position: relative;
+    overflow: hidden;
+}
+.hero-header::before {
+    content: '';
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+    background: radial-gradient(ellipse at 70% 50%, rgba(108,92,231,0.12) 0%, transparent 70%);
+    pointer-events: none;
+}
+.hero-title {
+    font-size: 1.9rem; font-weight: 700;
+    background: linear-gradient(90deg, #a29bfe, #74b9ff, #55efc4);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text; margin: 0 0 0.3rem 0;
+}
+.hero-sub { color: #8888aa; font-size: 0.95rem; font-weight: 400; }
+
+/* ─── Paper cards ──────────────────────────────────────────── */
 .paper-card {
-    background: linear-gradient(135deg, #1e1e2e 0%, #252535 100%);
-    border: 1px solid #3d3d5c;
-    border-radius: 12px;
-    padding: 1.2rem 1.5rem;
-    margin: 0.8rem 0;
-    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    background: linear-gradient(135deg, #13131f 0%, #1a1a2e 100%);
+    border: 1px solid #2e2e50;
+    border-radius: 14px;
+    padding: 1rem 1.4rem;
+    margin: 0.6rem 0;
+    transition: border-color .2s, box-shadow .2s;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.25);
 }
-.paper-card:hover { border-color: #6c5ce7; box-shadow: 0 4px 25px rgba(108,92,231,0.2); }
-
-/* Status badge */
-.status-badge {
-    display: inline-block;
-    background: #2d2d4e;
-    border: 1px solid #4a4a7a;
-    border-radius: 20px;
-    padding: 0.2rem 0.8rem;
-    font-size: 0.8rem;
-    color: #a0a0d0;
+.paper-card:hover {
+    border-color: #6c5ce7;
+    box-shadow: 0 4px 24px rgba(108,92,231,0.18);
 }
-
-/* Insight cards */
-.insight-card {
-    background: #1a1a3e;
-    border-left: 4px solid #6c5ce7;
-    border-radius: 0 8px 8px 0;
-    padding: 0.8rem 1rem;
-    margin: 0.4rem 0;
+.paper-number {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; border-radius: 50%;
+    background: #2a2a5a; color: #a29bfe;
+    font-size: 0.72rem; font-weight: 700; margin-right: 6px;
 }
 
-/* Metric boxes */
-.metric-box {
-    background: #1e1e3e;
-    border: 1px solid #3a3a5c;
+/* ─── Progress steps ───────────────────────────────────────── */
+.step-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 0.45rem 0.8rem;
     border-radius: 8px;
-    padding: 0.6rem 1rem;
-    text-align: center;
+    font-size: 0.88rem;
+    margin: 2px 0;
+    transition: background .15s;
+}
+.step-done  { color: #55efc4; background: #00b89408; }
+.step-active{ color: #fdcb6e; background: #f9ca2408; font-weight: 600; }
+.step-wait  { color: #555577; }
+.step-skip  { color: #444466; font-style: italic; }
+.step-error { color: #ff7675; background: #ff000010; }
+.step-icon  { font-size: 1rem; width: 20px; text-align: center; }
+
+/* ─── Error banner ─────────────────────────────────────────── */
+.error-banner {
+    background: linear-gradient(135deg, #2d1010, #3a1515);
+    border: 1px solid #8b2222;
+    border-left: 4px solid #ff4444;
+    border-radius: 10px;
+    padding: 1rem 1.4rem;
+    margin: 0.8rem 0;
+}
+.error-title { color: #ff7675; font-size: 1rem; font-weight: 600; margin-bottom: 6px; }
+.error-body  { color: #ccaaaa; font-size: 0.85rem; }
+
+/* ─── Insight cards ────────────────────────────────────────── */
+.insight-card {
+    background: rgba(108,92,231,0.06);
+    border-left: 3px solid #6c5ce7;
+    border-radius: 0 8px 8px 0;
+    padding: 0.65rem 1rem;
+    margin: 0.35rem 0;
+    font-size: 0.9rem;
+    line-height: 1.5;
 }
 
-/* Source tag */
+/* ─── Source tags ──────────────────────────────────────────── */
 .source-tag {
-    display: inline-block;
-    border-radius: 4px;
-    padding: 1px 6px;
-    font-size: 0.7rem;
-    font-weight: bold;
-    margin-right: 4px;
+    display: inline-block; border-radius: 6px;
+    padding: 2px 8px; font-size: 0.68rem; font-weight: 700;
+    letter-spacing: 0.03em; margin-right: 5px; vertical-align: middle;
 }
-.tag-arxiv { background: #b31b1b22; color: #ff6b6b; border: 1px solid #b31b1b44; }
-.tag-ss { background: #1a6b9922; color: #74b9ff; border: 1px solid #1a6b9944; }
-.tag-crossref { background: #1a9b4422; color: #55efc4; border: 1px solid #1a9b4444; }
-.tag-web { background: #9b6b1a22; color: #ffeaa7; border: 1px solid #9b6b1a44; }
-.tag-core { background: #6b1a9b22; color: #a29bfe; border: 1px solid #6b1a9b44; }
+.tag-arxiv       { background: rgba(179,27,27,.15);  color: #ff7675; border: 1px solid rgba(179,27,27,.3); }
+.tag-ss          { background: rgba(26,107,153,.15);  color: #74b9ff; border: 1px solid rgba(26,107,153,.3); }
+.tag-crossref    { background: rgba(26,155,68,.15);   color: #55efc4; border: 1px solid rgba(26,155,68,.3); }
+.tag-web         { background: rgba(155,107,26,.15);  color: #ffeaa7; border: 1px solid rgba(155,107,26,.3); }
+.tag-core        { background: rgba(107,26,155,.15);  color: #a29bfe; border: 1px solid rgba(107,26,155,.3); }
+.tag-ieee        { background: rgba(0,115,230,.15);   color: #79bcff; border: 1px solid rgba(0,115,230,.3); }
+.tag-elsevier    { background: rgba(255,140,0,.12);   color: #ffa94d; border: 1px solid rgba(255,140,0,.3); }
+.tag-mdpi        { background: rgba(0,180,150,.12);   color: #51cf66; border: 1px solid rgba(0,180,150,.3); }
+.tag-nature      { background: rgba(180,60,120,.12);  color: #f783ac; border: 1px solid rgba(180,60,120,.3); }
+
+/* ─── Sidebar ──────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0e0e1e 0%, #111120 100%);
+    border-right: 1px solid #1e1e3a;
+}
+[data-testid="stSidebar"] .stButton>button {
+    border-radius: 8px; font-size: 0.83rem;
+}
+
+/* ─── Metrics strip ────────────────────────────────────────── */
+.metrics-strip {
+    display: flex; gap: 12px; flex-wrap: wrap;
+    margin: 0.8rem 0 1rem 0;
+}
+.metric-pill {
+    background: #161628; border: 1px solid #2a2a4a;
+    border-radius: 10px; padding: 0.5rem 1rem;
+    min-width: 90px; text-align: center;
+}
+.metric-pill .val { font-size: 1.3rem; font-weight: 700; color: #a29bfe; }
+.metric-pill .lbl { font-size: 0.7rem; color: #666688; text-transform: uppercase; }
+
+/* ─── Query area ───────────────────────────────────────────── */
+.stTextArea textarea {
+    background: #0e0e1e !important;
+    border: 1px solid #2e2e50 !important;
+    border-radius: 10px !important;
+    font-size: 0.93rem !important;
+    line-height: 1.6 !important;
+    color: #d0d0f0 !important;
+}
+.stTextArea textarea:focus {
+    border-color: #6c5ce7 !important;
+    box-shadow: 0 0 0 2px rgba(108,92,231,.15) !important;
+}
+
+/* ─── Primary button ───────────────────────────────────────── */
+.stButton>button[kind="primary"] {
+    background: linear-gradient(135deg, #6c5ce7, #a29bfe) !important;
+    border: none !important; border-radius: 10px !important;
+    font-weight: 600 !important; letter-spacing: 0.02em !important;
+    transition: opacity .2s, transform .1s !important;
+}
+.stButton>button[kind="primary"]:hover {
+    opacity: .9 !important; transform: translateY(-1px) !important;
+}
+
+/* ─── Stop button ──────────────────────────────────────────── */
+.stop-btn>button {
+    background: linear-gradient(135deg, #c0392b, #e74c3c) !important;
+    color: #fff !important; border: none !important;
+    border-radius: 10px !important; font-weight: 600 !important;
+}
+
+/* ─── Expanders ────────────────────────────────────────────── */
+.streamlit-expanderHeader {
+    background: #13131f !important; border-radius: 8px !important;
+    font-size: 0.88rem !important;
+}
+
+/* ─── Dividers ─────────────────────────────────────────────── */
+[data-testid="stDecoration"] { background: #2a2a4a !important; }
+hr { border-color: #2a2a4a !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ── Session state initialisation ──────────────────────────────────────────────
 def _init_session():
+    from datetime import datetime as _dt
+    _cur_year = _dt.now().year
     defaults = {
         "session_id": str(uuid.uuid4()),
         "research_state": None,
@@ -109,6 +237,17 @@ def _init_session():
         "selected_provider": settings.LLM_PROVIDER,
         "selected_model": settings.DEFAULT_MODEL,
         "memory_enabled": settings.MEMORY_ENABLED_DEFAULT,
+        "year_min_pre": _cur_year - 5,
+        "year_max_pre": _cur_year,
+        # threading / progress tracking
+        "agent_queue": None,
+        "stop_event": None,
+        "agent_step_idx": 0,
+        "agent_last_status": "",
+        "agent_error": None,
+        "agent_stopped": False,
+        # search options
+        "fast_mode": False,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -120,8 +259,25 @@ _init_session()
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 def render_sidebar():
     with st.sidebar:
-        st.markdown(f"# {settings.APP_ICON} {settings.APP_TITLE}")
-        st.markdown("*Advanced Research Discovery & Synthesis*")
+        st.markdown(
+            f'<div style="padding:0.8rem 0 0.4rem 0">'
+            f'<span style="font-size:1.6rem;font-weight:700;'
+            f'background:linear-gradient(90deg,#a29bfe,#74b9ff);'
+            f'-webkit-background-clip:text;-webkit-text-fill-color:transparent;'
+            f'background-clip:text">'
+            f'{settings.APP_ICON} {settings.APP_TITLE}</span><br>'
+            f'<span style="color:#666688;font-size:0.78rem">AI-powered research synthesis</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        # Running indicator in sidebar
+        if st.session_state.is_running:
+            st.markdown(
+                '<div style="background:#1a1a3e;border:1px solid #3a3a7a;border-radius:8px;'
+                'padding:0.4rem 0.8rem;margin:0.4rem 0;color:#a29bfe;font-size:0.82rem">'
+                '⏳ Search in progress…</div>',
+                unsafe_allow_html=True,
+            )
         st.divider()
 
         # ── LLM Configuration ──────────────────────────────────────────────
@@ -229,12 +385,85 @@ def render_sidebar():
         st.subheader("📡 Sources")
         col1, col2 = st.columns(2)
         with col1:
-            st.session_state["src_arxiv"] = st.checkbox("arXiv", value=True)
-            st.session_state["src_ss"] = st.checkbox("Semantic Scholar", value=True)
-            st.session_state["src_core"] = st.checkbox("CORE", value=True)
+            st.session_state["src_arxiv"]   = st.checkbox("arXiv",            value=st.session_state.get("src_arxiv", True))
+            st.session_state["src_ss"]      = st.checkbox("Semantic Scholar",  value=st.session_state.get("src_ss", True))
+            st.session_state["src_core"]    = st.checkbox("CORE",              value=st.session_state.get("src_core", True))
+            st.session_state["src_ieee"]    = st.checkbox("IEEE Xplore",       value=st.session_state.get("src_ieee", True))
+            st.session_state["src_nature"]  = st.checkbox("Nature / Springer", value=st.session_state.get("src_nature", True))
+            st.session_state["src_acm"]     = st.checkbox("ACM Digital Lib.",  value=st.session_state.get("src_acm", True))
         with col2:
-            st.session_state["src_crossref"] = st.checkbox("CrossRef", value=True)
-            st.session_state["src_web"] = st.checkbox("Web Search", value=True)
+            st.session_state["src_crossref"]   = st.checkbox("CrossRef",       value=st.session_state.get("src_crossref", True))
+            st.session_state["src_web"]         = st.checkbox("Web Search",     value=st.session_state.get("src_web", True))
+            st.session_state["src_scidir"]      = st.checkbox("ScienceDirect",  value=st.session_state.get("src_scidir", True))
+            st.session_state["src_mdpi"]        = st.checkbox("MDPI",           value=st.session_state.get("src_mdpi", True))
+            st.session_state["src_springer"]    = st.checkbox("Springer Link",  value=st.session_state.get("src_springer", True))
+            st.session_state["src_openreview"]  = st.checkbox("OpenReview (NeurIPS/ICLR)", value=st.session_state.get("src_openreview", True))
+
+        st.divider()
+        st.subheader("⚡ Speed")
+        st.session_state["fast_mode"] = st.toggle(
+            "Fast mode",
+            value=st.session_state.get("fast_mode", False),
+            help=(
+                "Reduces per-source timeout to 12 s and skips the rate-limited "
+                "Semantic Scholar delay. Results arrive faster but some sources "
+                "may time out on slow connections."
+            ),
+        )
+        if st.session_state["fast_mode"]:
+            st.caption("⚡ Sources run with short 12 s timeout")
+        else:
+            st.caption("🐢 Sources run with full 50 s timeout")
+
+        # ── LLM Temperature ───────────────────────────────────────────────
+        st.divider()
+        st.subheader("🌡️ Temperature")
+        st.session_state["llm_temperature"] = st.slider(
+            "Creativity / randomness",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(st.session_state.get("llm_temperature", 0.3)),
+            step=0.05,
+            help=(
+                "Higher values produce more varied / creative phrasing in "
+                "summaries and insights. Lower values (0.0–0.2) are more "
+                "deterministic and consistent across runs."
+            ),
+        )
+        _t = st.session_state["llm_temperature"]
+        if _t <= 0.15:
+            st.caption("🔒 Deterministic — identical results per run")
+        elif _t <= 0.4:
+            st.caption("🎯 Balanced — consistent with slight variation")
+        elif _t <= 0.7:
+            st.caption("🎨 Creative — noticeable variation across runs")
+        else:
+            st.caption("🌪️ High randomness — very diverse outputs")
+
+        # ── Pre-search Publication Year Filter ────────────────────────────
+        st.divider()
+        st.subheader("📅 Publication Year")
+        from datetime import datetime as _dt2
+        _cur_yr = _dt2.now().year
+        yr_col1, yr_col2 = st.columns(2)
+        with yr_col1:
+            st.session_state["year_min_pre"] = st.number_input(
+                "From year",
+                min_value=1990,
+                max_value=_cur_yr,
+                value=int(st.session_state.get("year_min_pre", _cur_yr - 5)),
+                step=1,
+                key="year_min_input",
+            )
+        with yr_col2:
+            st.session_state["year_max_pre"] = st.number_input(
+                "To year",
+                min_value=1990,
+                max_value=_cur_yr,
+                value=int(st.session_state.get("year_max_pre", _cur_yr)),
+                step=1,
+                key="year_max_input",
+            )
 
         st.divider()
 
@@ -281,135 +510,364 @@ def _render_api_status(provider: str):
 
 # ── Main content ──────────────────────────────────────────────────────────────
 def render_main():
-    st.title(f"{settings.APP_ICON} Intelligent Research Discovery")
+    # ── Hero header ────────────────────────────────────────────────────────
     st.markdown(
-        "_Describe your research idea, problem statement, or keywords — "
-        "the agent will find, rank, and synthesize relevant academic & industrial work._"
+        f"""<div class="hero-header">
+        <div class="hero-title">{settings.APP_ICON} Intelligent Research Discovery</div>
+        <div class="hero-sub">
+            Describe your research idea, problem, or keywords — the agent searches
+            top-tier journals &amp; databases, ranks, and synthesises results for you.
+        </div>
+        </div>""",
+        unsafe_allow_html=True,
     )
 
-    # ── Query input ────────────────────────────────────────────────────────
-    with st.container():
-        query = st.text_area(
-            "📝 Research Query",
-            placeholder=(
-                "Example: I want to work on lightweight deep learning models for "
-                "real-time plant disease detection on edge devices using minimal "
-                "computational resources...\n\n"
-                "You can enter: keywords, a research idea, problem statement, "
-                "draft abstract, or research gap description."
-            ),
-            height=150,
-            max_chars=settings.MAX_QUERY_LENGTH,
-            key="query_input",
-            help=f"Max {settings.MAX_QUERY_LENGTH} characters. The more context, the better.",
+    # ── Show agent error if one occurred ──────────────────────────────────
+    if st.session_state.agent_error:
+        err = st.session_state.agent_error
+        st.markdown(
+            f'<div class="error-banner">'
+            f'<div class="error-title">❌ Search failed</div>'
+            f'<div class="error-body">{err["short"]}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander("🔍 Technical details (check CLI for full traceback)"):
+            st.code(err["detail"], language=None)
+        col_retry, col_dismiss, _ = st.columns([1, 1, 2])
+        with col_retry:
+            if st.button("🔄 Try Again", type="primary", key="retry_btn"):
+                st.session_state.agent_error = None
+                st.rerun()
+        with col_dismiss:
+            if st.button("✖ Dismiss", key="dismiss_err"):
+                st.session_state.agent_error = None
+                st.rerun()
+        st.divider()
+
+    # ── Show stopped notice ────────────────────────────────────────────────
+    if st.session_state.agent_stopped:
+        st.info("⏹ Search was stopped. You can start a new search below.", icon="ℹ️")
+        st.session_state.agent_stopped = False
+
+    # ── Query input (always visible) ───────────────────────────────────────
+    running = st.session_state.is_running
+
+    query = st.text_area(
+        "📝 Research Query",
+        placeholder=(
+            "Example: I want to build an IoT-based sleep monitoring system using "
+            "CNN + BiLSTM hybrid models optimised with PSO/GWO for real-time inference...\n\n"
+            "Tip: include your domain, techniques, and application area for best results."
+        ),
+        height=150,
+        max_chars=settings.MAX_QUERY_LENGTH,
+        key="query_input",
+        disabled=running,
+        help=f"Max {settings.MAX_QUERY_LENGTH} characters. The more context, the better.",
+    )
+
+    btn_col, count_col = st.columns([3, 1])
+    with btn_col:
+        run_clicked = st.button(
+            "🚀 Start Research",
+            type="primary",
+            use_container_width=True,
+            disabled=running,
+        )
+    with count_col:
+        q_len = len(query or "")
+        pct = int(q_len / settings.MAX_QUERY_LENGTH * 100)
+        color = "#55efc4" if pct < 80 else "#fdcb6e" if pct < 95 else "#ff7675"
+        st.markdown(
+            f"<div style='text-align:right;color:{color};padding-top:0.5rem;font-size:0.82rem'>"
+            f"{q_len}/{settings.MAX_QUERY_LENGTH}</div>",
+            unsafe_allow_html=True,
         )
 
-        col_btn, col_count = st.columns([3, 1])
-        with col_btn:
-            run_clicked = st.button(
-                "🚀 Start Research",
-                type="primary",
-                use_container_width=True,
-                disabled=st.session_state.is_running,
-            )
-        with col_count:
-            st.markdown(
-                f"<div style='text-align:right;color:#888;padding-top:0.5rem'>"
-                f"{len(query or '')}/{settings.MAX_QUERY_LENGTH}</div>",
-                unsafe_allow_html=True,
-            )
-
     # ── Example queries ────────────────────────────────────────────────────
-    with st.expander("💡 Example queries to try", expanded=False):
-        examples = [
-            "Lightweight transformer models for real-time object detection on edge devices with limited memory",
-            "Federated learning for privacy-preserving medical imaging diagnosis",
-            "Large language models for code generation and automated software testing",
-            "Multimodal AI for crop disease detection using drone imagery and IoT sensors",
-            "Quantum computing algorithms for optimization problems in supply chain management",
-        ]
-        for ex in examples:
-            if st.button(f"→ {ex[:80]}...", key=f"ex_{ex[:20]}", use_container_width=False):
-                st.session_state.query_input = ex
-                st.rerun()
+    if not running:
+        with st.expander("💡 Example queries", expanded=False):
+            examples = [
+                "IoT-based sleep monitoring with CNN/LSTM hybrid and PSO/GWO optimizers for wearable edge devices",
+                "Lightweight transformer models for real-time object detection on resource-constrained edge devices",
+                "Federated learning for privacy-preserving medical imaging diagnosis using MRI and CT scans",
+                "Large language models for automated code generation, testing, and bug-fix suggestions",
+                "Multimodal deep learning for crop disease detection using drone NDVI imagery and IoT soil sensors",
+            ]
+            for ex in examples:
+                if st.button(f"↗ {ex[:100]}", key=f"ex_{hash(ex)}", use_container_width=True):
+                    st.session_state["query_input"] = ex
+                    st.rerun()
 
     st.divider()
 
-    # ── Run agent ──────────────────────────────────────────────────────────
-    if run_clicked and query and query.strip():
-        _run_agent(query.strip())
-    elif run_clicked and not (query and query.strip()):
-        st.warning("⚠️ Please enter a research query before starting.")
+    # ── Start agent ────────────────────────────────────────────────────────
+    if run_clicked:
+        if query and query.strip():
+            _start_agent(query.strip())  # sets is_running=True, calls st.rerun()
+        else:
+            st.warning("⚠️ Please enter a research query before starting.")
+
+    # ── Live progress panel (fragment — no full-page flicker) ──────────────
+    if st.session_state.is_running:
+        _progress_fragment()
 
     # ── Display results ────────────────────────────────────────────────────
-    if st.session_state.research_state:
+    if st.session_state.research_state and not st.session_state.is_running:
         render_results(st.session_state.research_state)
 
 
-def _run_agent(query: str):
-    """Execute the research agent with streaming updates."""
-    st.session_state.is_running = True
-    st.session_state.research_state = None
+def _start_agent(query: str):
+    """
+    Kick off the research agent in a background thread.
+    Results / errors are communicated via a queue.Queue in session state.
+    The progress fragment polls that queue every second independently.
+    """
+    stop_event = threading.Event()
+    agent_queue: queue.Queue = queue.Queue()
 
-    progress_area = st.empty()
-    status_area = st.empty()
+    st.session_state.agent_queue        = agent_queue
+    st.session_state.stop_event         = stop_event
+    st.session_state.agent_step_idx     = 0
+    st.session_state.agent_last_status  = "Starting research agent…"
+    st.session_state.agent_error        = None
+    st.session_state.agent_stopped      = False
+    st.session_state.is_running         = True
+    st.session_state.research_state     = None
+    st.session_state.papers_shown       = 15  # reset pagination for new query
 
-    # Node display names for progress bar
-    node_steps = [
-        ("parse_query", "🧠 Understanding research intent..."),
-        ("generate_search_plan", "📋 Planning search strategy..."),
-        ("retrieve_papers", "🔍 Searching academic databases & web..."),
-        ("rank_sources", "📊 Ranking & filtering results..."),
-        ("synthesize_papers", "🧪 Synthesizing each paper..."),
-        ("generate_insights", "🔬 Generating research insights..."),
-        ("update_memory", "💾 Updating research memory..."),
-    ]
-    total_steps = len(node_steps)
-    step_idx = 0
+    cfg = dict(
+        query=query,
+        llm_provider=st.session_state.selected_provider,
+        llm_model=st.session_state.selected_model,
+        llm_temperature=st.session_state.get("llm_temperature", 0.3),
+        memory_enabled=st.session_state.memory_enabled,
+        session_id=st.session_state.session_id if st.session_state.memory_enabled else None,
+        year_min=st.session_state.get("year_min_pre"),
+        year_max=st.session_state.get("year_max_pre"),
+        fast_mode=st.session_state.get("fast_mode", False),
+        stop_event=stop_event,
+        agent_queue=agent_queue,
+        enabled_sources=[
+            src for src, key in {
+                "arxiv":            "src_arxiv",
+                "semantic_scholar": "src_ss",
+                "crossref":         "src_crossref",
+                "core":             "src_core",
+                "ieee_web":         "src_ieee",
+                "sciencedirect_web":"src_scidir",
+                "mdpi_web":         "src_mdpi",
+                "nature_web":       "src_nature",
+                "acm_web":          "src_acm",
+                "springer_web":     "src_springer",
+                "openreview_web":   "src_openreview",
+            }.items()
+            if st.session_state.get(key, True)
+        ],
+    )
 
-    with st.spinner(""):
+    def _worker():
+        final = None
         try:
-            progress_bar = progress_area.progress(0, text="Starting research agent...")
-            final_state = None
-
-            for state_update in stream_research_agent(
-                query=query,
-                llm_provider=st.session_state.selected_provider,
-                llm_model=st.session_state.selected_model,
-                memory_enabled=st.session_state.memory_enabled,
-                session_id=st.session_state.session_id if st.session_state.memory_enabled else None,
-            ):
-                final_state = state_update
-                status_msg = state_update.get("status_message", "")
-
-                step_idx = min(step_idx + 1, total_steps)
-                progress_pct = int((step_idx / total_steps) * 100)
-                progress_bar.progress(progress_pct, text=status_msg)
-                status_area.markdown(f"**Status:** {status_msg}")
-
-            progress_area.progress(100, text="✅ Research complete!")
-            status_area.empty()
-
-            if final_state:
-                st.session_state.research_state = final_state
-                if st.session_state.memory_enabled:
-                    st.session_state.session_id = final_state.get(
-                        "session_id", st.session_state.session_id
-                    )
-                # Add to history
-                st.session_state.query_history.insert(0, {
-                    "query": query,
-                    "paper_count": len(final_state.get("synthesized_papers", [])),
-                })
-
+            first_chunk = True
+            for upd in stream_research_agent(**cfg):
+                if first_chunk:
+                    # LangGraph 1.x always emits the initial state as chunk 0
+                    # before any node executes — skip it so step_idx only
+                    # advances when a node actually completes.
+                    first_chunk = False
+                    continue
+                if stop_event.is_set():
+                    agent_queue.put({"_type": "stopped", "state": final})
+                    return
+                final = upd
+                agent_queue.put({"_type": "update", **upd})
+            agent_queue.put({"_type": "complete", "state": final})
         except Exception as exc:
-            progress_area.error(f"❌ Agent failed: {exc}")
-            st.exception(exc)
-        finally:
-            st.session_state.is_running = False
+            tb = traceback.format_exc()
+            import logging
+            logging.getLogger(__name__).error("Agent error:\n%s", tb)
+            agent_queue.put({
+                "_type": "error",
+                "short":  _friendly_error(exc),
+                "detail": tb,
+            })
 
-    time.sleep(0.5)
+    threading.Thread(target=_worker, daemon=True).start()
     st.rerun()
+
+
+def _friendly_error(exc: Exception) -> str:
+    """Convert a raw exception into a short, user-readable message."""
+    msg = str(exc)
+    lower = msg.lower()
+    if "401" in msg or "unauthorized" in lower or "invalid api key" in lower:
+        return "API authentication failed (401). Check your API key in .env."
+    if "403" in msg or "forbidden" in lower:
+        return "Access forbidden (403). Your API key may not have permission."
+    if "404" in msg or "not found" in lower:
+        return "Endpoint not found (404). Model name or API URL may be wrong."
+    if "429" in msg or "rate limit" in lower or "quota" in lower:
+        return "Rate limit / quota exceeded (429). Wait a moment or use a different provider."
+    if "503" in msg or "service unavailable" in lower:
+        return "Service unavailable (503). The remote API is down — try again shortly."
+    if "connection" in lower or "timeout" in lower or "timed out" in lower:
+        return "Network error — could not reach the API. Check your internet connection."
+    if "model" in lower and ("not" in lower or "exist" in lower or "found" in lower):
+        return f"Model not found: {msg[:120]}"
+    # Generic fallback — show first 200 chars
+    return msg[:200] if len(msg) <= 200 else msg[:200] + "…"
+
+
+# Pipeline steps shown in the progress checklist
+_PIPELINE_STEPS = [
+    ("parse_query",         "🧠", "Understanding research intent"),
+    ("generate_search_plan","📋", "Planning search strategy"),
+    ("retrieve_papers",     "🔍", "Searching databases & web"),
+    ("rank_sources",        "📊", "Ranking & filtering results"),
+    ("synthesize_papers",   "🧪", "Synthesising each paper"),
+    ("generate_insights",   "🔬", "Generating research insights"),
+    ("update_memory",       "💾", "Updating memory"),
+]
+
+
+@st.fragment(run_every=1)
+def _progress_fragment():
+    """
+    Auto-refreshes every second as a fragment — only this section re-renders,
+    so the rest of the page (query box, sidebar) stays perfectly static with
+    no dimming, no flickering.  The stop button works reliably because Streamlit
+    processes fragment interactions without a full-page rerun.
+    """
+    aq: "queue.Queue | None" = st.session_state.get("agent_queue")
+    stop_event: "threading.Event | None" = st.session_state.get("stop_event")
+    step_idx: int = st.session_state.get("agent_step_idx", 0)
+
+    # ── Drain all new queue messages ──────────────────────────────────
+    finished = False
+    if aq:
+        while True:
+            try:
+                msg = aq.get_nowait()
+            except queue.Empty:
+                break
+
+            mtype = msg.get("_type", "update")
+
+            if mtype == "interim":
+                # Live status pushed directly from inside a running node.
+                # Update the status text but do NOT advance the step counter.
+                st.session_state.agent_last_status = msg.get("status_message", "")
+
+            elif mtype == "update":
+                step_idx += 1
+                st.session_state.agent_step_idx     = step_idx
+                st.session_state.agent_last_status  = msg.get("status_message", "")
+
+            elif mtype == "complete":
+                finished = True
+                state = msg.get("state")
+                if state:
+                    # Strip non-serialisable internal threading objects before
+                    # storing in session_state — prevents potential Streamlit
+                    # serialisation errors on newer versions.
+                    clean_state = {k: v for k, v in state.items()
+                                   if not k.startswith("_")}
+                    st.session_state.research_state = clean_state
+                    if st.session_state.memory_enabled:
+                        st.session_state.session_id = clean_state.get(
+                            "session_id", st.session_state.session_id
+                        )
+                    st.session_state.query_history.insert(0, {
+                        "query": clean_state.get("query", ""),
+                        "paper_count": len(clean_state.get("synthesized_papers", [])),
+                    })
+                st.session_state.is_running = False
+                break
+
+            elif mtype == "stopped":
+                finished = True
+                st.session_state.is_running    = False
+                st.session_state.agent_stopped = True
+                raw = msg.get("state")
+                if raw:
+                    st.session_state.research_state = {
+                        k: v for k, v in raw.items() if not k.startswith("_")
+                    }
+                break
+
+            elif mtype == "error":
+                finished = True
+                st.session_state.is_running  = False
+                st.session_state.agent_error = {
+                    "short":  msg.get("short", "Unknown error"),
+                    "detail": msg.get("detail", ""),
+                }
+                break
+
+    # ── Render progress panel ─────────────────────────────────────────
+    memory_on = st.session_state.get("memory_enabled", False)
+    # Exclude the memory step from the total when memory is disabled,
+    # so the progress bar reaches 100 % after generate_insights.
+    total = len(_PIPELINE_STEPS) - (0 if memory_on else 1)
+    pct   = min(int(step_idx / total * 100), 99) if not finished else 100
+
+    with st.container():
+        hdr_col, stop_col = st.columns([4, 1])
+        with hdr_col:
+            st.markdown(
+                '<p style="font-size:1rem;font-weight:600;color:#a29bfe;margin:0">'
+                '⚙️ Research in progress…</p>',
+                unsafe_allow_html=True,
+            )
+        with stop_col:
+            # Red stop button — inside the fragment so click is processed
+            # without a full-page rerun
+            stop_clicked = st.button(
+                "⏹ Stop",
+                key="stop_btn",
+                use_container_width=True,
+                type="secondary",
+            )
+            if stop_clicked:
+                if stop_event:
+                    stop_event.set()
+                st.session_state.is_running    = False
+                st.session_state.agent_stopped = True
+                st.rerun()  # full page rerun to show stopped state
+
+        st.progress(pct, text=st.session_state.get("agent_last_status", "Working…"))
+
+        # Step checklist
+        rows = ""
+        for i, (node_key, icon, label) in enumerate(_PIPELINE_STEPS):
+            is_memory = (node_key == "update_memory")
+            if is_memory and not memory_on:
+                # Memory disabled — step never runs; show as dimmed/skipped
+                css, dot = "step-skip", "─"
+            elif finished or i < step_idx:
+                css, dot = "step-done",   "✅"
+            elif i == step_idx:
+                css, dot = "step-active", "⏳"
+            else:
+                css, dot = "step-wait",   "⬜"
+            rows += (
+                f'<div class="step-row {css}">'
+                f'<span class="step-icon">{dot}</span>'
+                f'<span>{icon} {label}</span>'
+                f'</div>'
+            )
+        st.markdown(
+            f'<div style="background:#0a0a18;border:1px solid #2a2a4a;'
+            f'border-radius:12px;padding:0.7rem 1rem;margin-top:0.5rem">'
+            f'{rows}</div>',
+            unsafe_allow_html=True,
+        )
+
+    # When done, do ONE full-page rerun to show results / errors
+    if finished:
+        st.rerun()
 
 
 # ── Results rendering ─────────────────────────────────────────────────────────
@@ -438,19 +896,24 @@ def render_results(state: dict):
     # ── Tab 1: Papers ──────────────────────────────────────────────────────
     with tab_papers:
         if not papers:
-            st.info("No papers retrieved.")
+            st.info("No papers retrieved. Try broadening your query or enabling more sources.")
         else:
-            # Summary bar
-            ccol1, ccol2, ccol3, ccol4 = st.columns(4)
             sources = {p.get("source", "Unknown") for p in papers}
-            years = [p.get("year") for p in papers if p.get("year")]
+            years = sorted([p.get("year") for p in papers if p.get("year")])
             cited = [p.get("citation_count", 0) or 0 for p in papers]
+            yr_range = f"{min(years)}–{max(years)}" if years else "N/A"
+            avg_cite = f"{sum(cited)/len(cited):.0f}" if any(cited) else "N/A"
 
-            ccol1.metric("Total Papers", len(papers))
-            ccol2.metric("Sources", len(sources))
-            ccol3.metric("Year Range", f"{min(years) if years else 'N/A'} – {max(years) if years else 'N/A'}")
-            ccol4.metric("Avg Citations", f"{sum(cited)/len(cited):.0f}" if cited else "N/A")
-
+            # Metrics strip (custom HTML pills)
+            st.markdown(
+                f'<div class="metrics-strip">'
+                f'<div class="metric-pill"><div class="val">{len(papers)}</div><div class="lbl">Papers</div></div>'
+                f'<div class="metric-pill"><div class="val">{len(sources)}</div><div class="lbl">Sources</div></div>'
+                f'<div class="metric-pill"><div class="val">{yr_range}</div><div class="lbl">Years</div></div>'
+                f'<div class="metric-pill"><div class="val">{avg_cite}</div><div class="lbl">Avg Citations</div></div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
             st.markdown("---")
 
             # Filter controls
@@ -463,7 +926,7 @@ def render_results(state: dict):
                     key="src_filter",
                 )
             with fcol2:
-                if years:
+                if years and min(years) < max(years):
                     year_range = st.slider(
                         "Year range",
                         min_value=min(years),
@@ -471,6 +934,9 @@ def render_results(state: dict):
                         value=(min(years), max(years)),
                         key="year_range",
                     )
+                elif years:
+                    year_range = (years[0], years[0])
+                    st.caption(f"📅 All papers from {years[0]}")
                 else:
                     year_range = (0, 9999)
             with fcol3:
@@ -495,9 +961,32 @@ def render_results(state: dict):
 
             st.caption(f"Showing {len(filtered)} of {len(papers)} papers")
 
+            # Pagination — initialise per-query counter
+            if "papers_shown" not in st.session_state:
+                st.session_state.papers_shown = 15
+
+            page_papers = filtered[: st.session_state.papers_shown]
+
             # Paper cards
-            for i, paper in enumerate(filtered, 1):
+            for i, paper in enumerate(page_papers, 1):
                 _render_paper_card(paper, i)
+
+            # Load More button
+            remaining = len(filtered) - len(page_papers)
+            if remaining > 0:
+                st.markdown("---")
+                lcol, mcol, rcol = st.columns([1, 2, 1])
+                with mcol:
+                    if st.button(
+                        f"📄 Load more ({remaining} remaining)",
+                        use_container_width=True,
+                        key="load_more_btn",
+                    ):
+                        st.session_state.papers_shown += 15
+                        st.rerun()
+            else:
+                if len(filtered) > 15:
+                    st.caption(f"✅ All {len(filtered)} papers shown")
 
     # ── Tab 2: Insights ────────────────────────────────────────────────────
     with tab_insights:
@@ -643,14 +1132,26 @@ def render_results(state: dict):
 def _render_paper_card(paper: dict, index: int):
     source = paper.get("source", "Unknown")
     source_class = {
-        "arXiv": "tag-arxiv",
+        "arXiv":            "tag-arxiv",
         "Semantic Scholar": "tag-ss",
-        "CrossRef": "tag-crossref",
-        "CORE": "tag-core",
+        "CrossRef":         "tag-crossref",
+        "CORE":             "tag-core",
+        "IEEE Xplore":      "tag-ieee",
+        "Elsevier":         "tag-elsevier",
+        "MDPI":             "tag-mdpi",
+        "Nature":           "tag-nature",
+        "Springer":         "tag-nature",
     }.get(source, "tag-web")
 
-    title = paper.get("title", "Untitled")
-    year = paper.get("year", "")
+    title      = paper.get("title") or "Untitled"
+    year       = paper.get("year") or ""
+    citations  = paper.get("citation_count")
+    cite_str   = f"{citations:,}" if isinstance(citations, int) else "—"
+    relevance  = float(paper.get("relevance_score") or 0.0)
+    url        = paper.get("url", "")
+    pdf_url    = paper.get("pdf_url", "")
+    doi        = paper.get("doi", "")
+
     authors_raw = paper.get("authors", [])
     if isinstance(authors_raw, list):
         authors = ", ".join(str(a) for a in authors_raw[:4])
@@ -659,58 +1160,70 @@ def _render_paper_card(paper: dict, index: int):
     else:
         authors = str(authors_raw)
 
-    citations = paper.get("citation_count")
-    cite_str = f"{citations:,}" if isinstance(citations, int) else "N/A"
-    relevance = paper.get("relevance_score", 0.0)
-    url = paper.get("url", "")
-    pdf_url = paper.get("pdf_url", "")
-    doi = paper.get("doi", "")
-
-    synth = paper.get("synthesis", {})
-    summary = synth.get("summary", paper.get("abstract", "")[:300] or "_No summary available._")
-    methodology = synth.get("methodology", "")
+    synth        = paper.get("synthesis") or {}
+    summary      = synth.get("summary") or (paper.get("abstract") or "")[:350] or "_No summary available._"
+    methodology  = synth.get("methodology", "")
     contribution = synth.get("contribution", "")
-    limitations = synth.get("limitations", "")
+    limitations  = synth.get("limitations", "")
     future_scope = synth.get("future_scope", "")
 
-    with st.container():
-        st.markdown(
-            f"""<div class="paper-card">
-            <span class="source-tag {source_class}">{source}</span>
-            <strong>#{index} — {title}</strong>
-            {'(' + str(year) + ')' if year else ''}
-            </div>""",
-            unsafe_allow_html=True,
-        )
+    # Relevance colour bar
+    rel_pct   = min(int(relevance * 100), 100)
+    rel_color = "#55efc4" if rel_pct >= 70 else "#fdcb6e" if rel_pct >= 40 else "#ff7675"
 
-        with st.expander(
-            f"{'📄' if pdf_url else '🔗'} {title[:90]}{'...' if len(title)>90 else ''} "
-            f"({year or 'Year?'}) | Citations: {cite_str} | Score: {relevance:.2f}",
-            expanded=False,
-        ):
-            # Top row: links and metadata
-            link_col, meta_col = st.columns([2, 1])
-            with link_col:
-                if authors:
-                    st.caption(f"👥 **Authors:** {authors}")
-                if url:
-                    st.markdown(f"[🔗 View Paper]({url})", unsafe_allow_html=False)
-                if pdf_url and pdf_url != url:
-                    st.markdown(f"[📄 PDF]({pdf_url})")
-                if doi:
-                    st.caption(f"DOI: `{doi}`")
-            with meta_col:
-                st.metric("Relevance", f"{relevance:.2f}")
-                if citations is not None:
-                    st.metric("Citations", cite_str)
+    # Compact header card — build pieces then join to avoid nested f-string issues
+    icon = "📄" if pdf_url else "🔗"
+    title_short = title[:110] + ("…" if len(title) > 110 else "")
 
+    year_span  = (f'<span style="color:#888;font-size:0.78rem">{year}</span>'
+                  if year else "")
+    cite_span  = (f'<span style="color:#666688;font-size:0.75rem">· {cite_str} citations</span>'
+                  if cite_str and cite_str != "—" else "")
+    auth_div   = (f'<div style="margin-top:0.3rem;font-size:0.77rem;color:#666688">👥 {authors}</div>'
+                  if authors else "")
+
+    header_html = (
+        f'<div class="paper-card">'
+        f'<div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap">'
+        f'  <span class="paper-number">{index}</span>'
+        f'  <span class="source-tag {source_class}">{source}</span>'
+        f'  {year_span}'
+        f'  <span style="margin-left:auto;color:{rel_color};font-size:0.78rem;font-weight:600">★ {relevance:.2f}</span>'
+        f'  {cite_span}'
+        f'</div>'
+        f'<div style="margin-top:0.4rem;font-size:0.93rem;font-weight:500;line-height:1.45;color:#c8c8e8">'
+        f'  {icon} {title_short}'
+        f'</div>'
+        f'{auth_div}'
+        f'<div style="margin-top:6px;height:3px;border-radius:2px;background:#1e1e3e">'
+        f'  <div style="width:{rel_pct}%;height:100%;border-radius:2px;background:{rel_color};opacity:.6"></div>'
+        f'</div>'
+        f'</div>'
+    )
+    st.markdown(header_html, unsafe_allow_html=True)
+
+    with st.expander("▸ Details, synthesis & links", expanded=False):
+        # Links row
+        links = []
+        if url:
+            links.append(f"[🔗 View Paper]({url})")
+        if pdf_url and pdf_url != url:
+            links.append(f"[📄 PDF]({pdf_url})")
+        if doi:
+            links.append(f"DOI: `{doi}`")
+        if links:
+            st.markdown("  ·  ".join(links))
+
+        st.markdown("---")
+
+        # Summary
+        st.markdown("**📝 Summary**")
+        st.markdown(summary)
+
+        # Synthesis grid
+        has_synth = any([methodology, contribution, limitations, future_scope])
+        if has_synth:
             st.markdown("---")
-
-            # Synthesis sections
-            if summary:
-                st.markdown("**📝 Summary**")
-                st.markdown(summary)
-
             scol1, scol2 = st.columns(2)
             with scol1:
                 if methodology:

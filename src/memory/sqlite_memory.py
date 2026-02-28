@@ -13,7 +13,7 @@ import logging
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -291,4 +291,4 @@ def get_session_summary(session_id: str, db_path: Optional[str] = None) -> str:
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _now() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()

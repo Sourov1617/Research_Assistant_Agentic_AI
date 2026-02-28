@@ -9,6 +9,7 @@ For each ranked paper, generates a structured synthesis using the LLM:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -77,28 +78,72 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
     llm = get_llm(
         provider=state.get("llm_provider"),
         model=state.get("llm_model"),
+        temperature=state.get("llm_temperature"),
     )
     chain = _SYNTH_PROMPT | llm | JsonOutputParser()
 
     synthesized = []
     total = len(papers)
+    stop_event = state.get("_stop_event")
+    _q = state.get("_agent_queue")
+
+    # Per-paper LLM timeout — generous for slow/large models, but
+    # still lets stop_event abort cleanly mid-synthesis.
+    _SYNTH_TIMEOUT = 120  # seconds per paper
 
     for i, paper in enumerate(papers):
+        # Respect user-initiated stop — return whatever has been synthesized so far
+        if stop_event and stop_event.is_set():
+            logger.info("Synthesis stopped early by user after %d/%d papers", i, total)
+            break
+
         logger.info("Synthesizing paper %d/%d: %s", i + 1, total,
                     (paper.get("title") or "")[:60])
+        if _q:
+            _q.put({"_type": "interim",
+                    "status_message": f"🧪 Synthesising paper {i + 1}/{total}: "
+                                      f"{(paper.get('title') or '')[:50]}…"})
         try:
             abstract = (paper.get("abstract") or "")[:1500]
             if not abstract:
                 abstract = "No abstract available."
 
-            synthesis = chain.invoke({
+            payload = {
                 "title": paper.get("title", ""),
                 "authors": ", ".join(str(a) for a in (paper.get("authors") or [])[:5]),
                 "year": paper.get("year", "Unknown"),
                 "source": paper.get("source", ""),
                 "abstract": abstract,
                 "research_context": research_context,
-            })
+            }
+
+            # Run in a thread so stop_event can interrupt a hanging LLM call.
+            # Use shutdown(wait=False) instead of 'with' context manager so a
+            # timed-out thread is discarded immediately rather than blocking.
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = ex.submit(chain.invoke, payload)
+            synthesis = None
+            stop_fired = False
+            try:
+                remaining = _SYNTH_TIMEOUT
+                while remaining > 0:
+                    if stop_event and stop_event.is_set():
+                        logger.info("Synthesis cancelled mid-paper by stop_event.")
+                        synthesized.append({**paper, "synthesis": _fallback_synthesis(paper)})
+                        stop_fired = True
+                        break
+                    try:
+                        synthesis = future.result(timeout=min(1.0, remaining))
+                        break
+                    except concurrent.futures.TimeoutError:
+                        remaining -= 1.0
+                if synthesis is None and not stop_fired:
+                    logger.warning("Synthesis timed out for paper %d — using fallback.", i + 1)
+                    synthesis = _fallback_synthesis(paper)
+            finally:
+                ex.shutdown(wait=False)  # never block on a hung LLM thread
+            if stop_fired:
+                break  # exit paper loop
         except Exception as exc:
             logger.warning("Synthesis failed for paper %d: %s", i + 1, exc)
             synthesis = _fallback_synthesis(paper)

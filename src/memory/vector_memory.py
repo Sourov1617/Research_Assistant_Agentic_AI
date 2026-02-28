@@ -32,7 +32,10 @@ def _get_embeddings():
             base_url=settings.OLLAMA_BASE_URL,
         )
     else:  # huggingface (default, free)
-        from langchain_community.embeddings import HuggingFaceEmbeddings
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings  # preferred ≥0.2
+        except ImportError:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
         return HuggingFaceEmbeddings(model_name=settings.EMBEDDING_MODEL)
 
 

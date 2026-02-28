@@ -96,8 +96,8 @@ MAX_PAPERS_IN_MEMORY: int = _get("MAX_PAPERS_IN_MEMORY", 100, int)
 
 # ── Agent Behavior ────────────────────────────────────────────────────────────
 MAX_PAPERS_PER_SOURCE: int = _get("MAX_PAPERS_PER_SOURCE", 10, int)
-MAX_RANKED_PAPERS: int = _get("MAX_RANKED_PAPERS", 15, int)
-MIN_RELEVANCE_SCORE: float = _get("MIN_RELEVANCE_SCORE", 0.3, float)
+MAX_RANKED_PAPERS: int = _get("MAX_RANKED_PAPERS", 50, int)      # rank top 50; UI paginates
+MIN_RELEVANCE_SCORE: float = _get("MIN_RELEVANCE_SCORE", 0.05, float)  # lower bar so journals aren't dropped
 MAX_SYNTHESIS_TOKENS: int = _get("MAX_SYNTHESIS_TOKENS", 500, int)
 MAX_INSIGHTS_TOKENS: int = _get("MAX_INSIGHTS_TOKENS", 800, int)
 
