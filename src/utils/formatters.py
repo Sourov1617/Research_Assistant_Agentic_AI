@@ -1,12 +1,14 @@
 """
 Formatters — Convert agent output to Markdown / plain text for display.
 """
+
 from __future__ import annotations
 
 from typing import Any
 
 
 # ── Paper Card ────────────────────────────────────────────────────────────────
+
 
 def format_paper_card(paper: dict, index: int) -> str:
     """Render a single paper as a formatted Markdown card."""
@@ -17,7 +19,9 @@ def format_paper_card(paper: dict, index: int) -> str:
     url = paper.get("url", "")
     doi = paper.get("doi", "")
     citations = paper.get("citation_count", "N/A")
-    relevance = paper.get("relevance_score", 0.0)
+    relevance = float(paper.get("relevance_score", 0.0))
+    # Represent relevance both as 0.0-1.0 internal score and 1-5 star scale for display
+    relevance_5 = relevance * 5.0
 
     summary = paper.get("synthesis", {}).get("summary", "_Not synthesized yet._")
     methodology = paper.get("synthesis", {}).get("methodology", "")
@@ -35,7 +39,7 @@ def format_paper_card(paper: dict, index: int) -> str:
 ### {index}. {title} ({year})
 
 **Authors:** {authors}  
-**Source:** {source} | **Citations:** {citations} | **Relevance:** {relevance:.2f}  
+**Source:** {source} | **Citations:** {citations} | **Relevance:** {relevance_5:.1f}/5  
 {link_section}
 
 **📝 Summary:**  
@@ -64,6 +68,7 @@ def _format_authors(authors: list | str) -> str:
 
 
 # ── Insights Block ────────────────────────────────────────────────────────────
+
 
 def format_insights(insights: dict) -> str:
     """Render the research insights section as Markdown."""
@@ -104,6 +109,7 @@ def format_insights(insights: dict) -> str:
 
 # ── Query Intent Block ────────────────────────────────────────────────────────
 
+
 def format_parsed_intent(intent: dict) -> str:
     """Render the parsed query intent as Markdown."""
     if not intent:
@@ -126,6 +132,7 @@ def format_parsed_intent(intent: dict) -> str:
 
 # ── Full Report ────────────────────────────────────────────────────────────────
 
+
 def format_full_report(state: dict) -> str:
     """Build the complete Markdown research report from agent state."""
     sections: list[str] = []
@@ -145,7 +152,9 @@ def format_full_report(state: dict) -> str:
         for i, p in enumerate(papers, 1):
             sections.append(format_paper_card(p, i))
     else:
-        sections.append("\n_No papers retrieved. Try a different query or select more sources._\n")
+        sections.append(
+            "\n_No papers retrieved. Try a different query or select more sources._\n"
+        )
 
     # Insights
     if insights := state.get("insights"):
@@ -161,6 +170,7 @@ def format_full_report(state: dict) -> str:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _ensure_list(val: Any) -> list:
     if isinstance(val, list):

@@ -3,6 +3,7 @@ Query Parser Node
 Transforms a raw user query (keywords / paragraph / abstract) into a
 structured research intent dictionary.
 """
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -18,10 +19,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_PARSE_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are an expert research assistant specializing in academic literature.
+_PARSE_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """You are an expert research assistant specializing in academic literature.
 Your task is to analyze a user's research query and extract structured intent.
 
 CRITICAL DISTINCTION you must make:
@@ -61,12 +63,13 @@ Critical rules:
 - method_keywords are technique names only — never include subject terms in method_keywords
 - Extract optimizer/model names verbatim (PSO not 'particle swarm', BiLSTM not 'bidirectional LSTM')
 - search_queries: ALWAYS lead with primary_topic + application area, THEN add method names""",
-    ),
-    (
-        "human",
-        "Research query:\n{query}\n\nReturn only the JSON object, no extra text.",
-    ),
-])
+        ),
+        (
+            "human",
+            "Research query:\n{query}\n\nReturn only the JSON object, no extra text.",
+        ),
+    ]
+)
 
 
 def parse_query_node(state: "ResearchState") -> "ResearchState":
@@ -74,28 +77,31 @@ def parse_query_node(state: "ResearchState") -> "ResearchState":
     LangGraph node: parse raw user query → structured research intent.
     Updates state keys: parsed_intent, status_message.
     """
-    from src.models.llm_factory import get_llm
+    from src.models.llm_factory import invoke_with_provider_failover
 
     query = state.get("query", "").strip()
     if not query:
-        return {**state, "parsed_intent": {}, "status_message": "⚠️ Empty query received."}
+        return {
+            **state,
+            "parsed_intent": {},
+            "status_message": "⚠️ Empty query received.",
+        }
 
     logger.info("Parsing query: %s...", query[:80])
 
-    llm = get_llm(
-        provider=state.get("llm_provider"),
-        model=state.get("llm_model"),
-        temperature=state.get("llm_temperature"),
-    )
-    chain = _PARSE_PROMPT | llm | RobustJsonOutputParser()
+    parser = RobustJsonOutputParser()
     stop_event = state.get("_stop_event")
 
     # Push a live status update so the UI shows activity immediately,
     # before we even start the (potentially slow) LLM call.
     _q = state.get("_agent_queue")
     if _q:
-        _q.put({"_type": "interim",
-                "status_message": "\U0001f9e0 LLM analysing research intent\u2026"})
+        _q.put(
+            {
+                "_type": "interim",
+                "status_message": "\U0001f9e0 LLM analysing research intent\u2026",
+            }
+        )
 
     # Run LLM in a thread with a hard timeout so a completely broken provider
     # never hangs the pipeline (and stop_event can cancel it quickly).
@@ -108,7 +114,15 @@ def parse_query_node(state: "ResearchState") -> "ResearchState":
     # execution continues immediately.
     _LLM_TIMEOUT = 120  # seconds
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(chain.invoke, {"query": query})
+    future = executor.submit(
+        invoke_with_provider_failover,
+        _PARSE_PROMPT,
+        {"query": query},
+        state.get("llm_provider"),
+        state.get("llm_model"),
+        state.get("llm_temperature"),
+        parser,
+    )
     try:
         # Poll so stop_event can abort during the wait
         deadline = _LLM_TIMEOUT
@@ -116,20 +130,27 @@ def parse_query_node(state: "ResearchState") -> "ResearchState":
             if stop_event and stop_event.is_set():
                 logger.info("Query parsing cancelled by stop_event.")
                 executor.shutdown(wait=False)
-                return {**state, "parsed_intent": _fallback_intent(query),
-                        "status_message": "🛑 Search stopped."}
+                return {
+                    **state,
+                    "parsed_intent": _fallback_intent(query),
+                    "status_message": "🛑 Search stopped.",
+                }
             try:
                 intent = future.result(timeout=min(1.0, deadline))
                 # RobustJsonOutputParser returns {} on silent parse failure —
                 # use the keyword-based fallback so we always have something.
                 if not intent:
-                    logger.warning("Query parse LLM returned empty/invalid JSON — using fallback intent.")
+                    logger.warning(
+                        "Query parse LLM returned empty/invalid JSON — using fallback intent."
+                    )
                     intent = _fallback_intent(query)
                 break
             except concurrent.futures.TimeoutError:
                 deadline -= 1.0
         else:
-            logger.warning("Query parsing timed out after %ss — using fallback.", _LLM_TIMEOUT)
+            logger.warning(
+                "Query parsing timed out after %ss — using fallback.", _LLM_TIMEOUT
+            )
             intent = _fallback_intent(query)
     except Exception as exc:
         logger.error("Query parsing failed: %s", exc)
@@ -137,28 +158,62 @@ def parse_query_node(state: "ResearchState") -> "ResearchState":
     finally:
         executor.shutdown(wait=False)  # never block on a hung LLM thread
 
-    logger.info("Parsed intent: domain=%s, keywords=%s",
-                intent.get("domain", "N/A"),
-                intent.get("keywords", [])[:3])
+    logger.info(
+        "Parsed intent: domain=%s, keywords=%s",
+        intent.get("domain", "N/A"),
+        intent.get("keywords", [])[:3],
+    )
 
     return {
         **state,
         "parsed_intent": intent,
         "status_message": f"✅ Query understood: **{intent.get('domain', 'General')}** — "
-                          f"{', '.join(intent.get('keywords', [])[:5])}",
+        f"{', '.join(intent.get('keywords', [])[:5])}",
     }
 
 
 # ── Fallback ──────────────────────────────────────────────────────────────────
 
+
 def _fallback_intent(query: str) -> dict:
     """Simple keyword extraction as fallback when LLM call fails."""
-    words = re.findall(r"\b[a-zA-Z]{2,}\b", query)   # preserve case for acronyms
-    stopwords = {"that", "this", "with", "from", "have", "will", "been",
-                 "they", "their", "about", "when", "what", "how", "for",
-                 "are", "were", "which", "also", "using", "based", "want",
-                 "build", "further", "advanced", "like", "such", "etc",
-                 "main", "area", "focus", "and", "the", "its", "our"}
+    words = re.findall(r"\b[a-zA-Z]{2,}\b", query)  # preserve case for acronyms
+    stopwords = {
+        "that",
+        "this",
+        "with",
+        "from",
+        "have",
+        "will",
+        "been",
+        "they",
+        "their",
+        "about",
+        "when",
+        "what",
+        "how",
+        "for",
+        "are",
+        "were",
+        "which",
+        "also",
+        "using",
+        "based",
+        "want",
+        "build",
+        "further",
+        "advanced",
+        "like",
+        "such",
+        "etc",
+        "main",
+        "area",
+        "focus",
+        "and",
+        "the",
+        "its",
+        "our",
+    }
     seen: dict = {}
     for w in words:
         lw = w.lower()
@@ -168,8 +223,11 @@ def _fallback_intent(query: str) -> dict:
 
     # Heuristic split: uppercase tokens are likely acronyms/model/optimizer names
     upper_tokens = [w for w in words if w.isupper() and len(w) >= 2]
-    lower_tokens  = [w.lower() for w in words if not w.isupper() and len(w) >= 4
-                     and w.lower() not in stopwords]
+    lower_tokens = [
+        w.lower()
+        for w in words
+        if not w.isupper() and len(w) >= 4 and w.lower() not in stopwords
+    ]
 
     return {
         "domain": "Research",

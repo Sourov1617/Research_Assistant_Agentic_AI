@@ -7,6 +7,7 @@ Analyzes all synthesized papers collectively to produce:
   • suggested research directions for the user
   • high-level field overview
 """
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -24,10 +25,11 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-_INSIGHT_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are an elite research analyst. You have been given a set of synthesized research papers.
+_INSIGHT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """You are an elite research analyst. You have been given a set of synthesized research papers.
 Analyze them collectively and produce a comprehensive research insight report.
 
 Return ONLY valid JSON:
@@ -57,18 +59,19 @@ Return ONLY valid JSON:
   "maturity_level": "emerging|growing|mature|saturated",
   "interdisciplinary_connections": ["related field 1", "related field 2"]
 }}""",
-    ),
-    (
-        "human",
-        """User's research goal:
+        ),
+        (
+            "human",
+            """User's research goal:
 {research_goal}
 
 Synthesized papers (summaries):
 {papers_json}
 
 Return only the JSON.""",
-    ),
-])
+        ),
+    ]
+)
 
 
 def generate_insights_node(state: "ResearchState") -> "ResearchState":
@@ -76,11 +79,15 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
     LangGraph node: generate collective research insights from all synthesized papers.
     Updates state keys: insights.
     """
-    from src.models.llm_factory import get_llm
+    from src.models.llm_factory import invoke_with_provider_failover
 
     papers = state.get("synthesized_papers") or state.get("ranked_papers", [])
     if not papers:
-        return {**state, "insights": {}, "status_message": "⚠️ No papers to generate insights from."}
+        return {
+            **state,
+            "insights": {},
+            "status_message": "⚠️ No papers to generate insights from.",
+        }
 
     intent = state.get("parsed_intent", {})
     research_goal = (
@@ -93,39 +100,46 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
     paper_summaries = []
     for i, p in enumerate(papers[:12], 1):  # Limit to top 12 to avoid token overflow
         synth = p.get("synthesis", {})
-        paper_summaries.append({
-            "index": i,
-            "title": p.get("title", ""),
-            "year": p.get("year"),
-            "summary": (synth.get("summary") or (p.get("abstract") or "")[:200]),
-            "methodology": synth.get("methodology", ""),
-            "contribution": synth.get("contribution", ""),
-            "limitations": synth.get("limitations", ""),
-        })
+        paper_summaries.append(
+            {
+                "index": i,
+                "title": p.get("title", ""),
+                "year": p.get("year"),
+                "summary": (synth.get("summary") or (p.get("abstract") or "")[:200]),
+                "methodology": synth.get("methodology", ""),
+                "contribution": synth.get("contribution", ""),
+                "limitations": synth.get("limitations", ""),
+            }
+        )
 
-    llm = get_llm(
-        provider=state.get("llm_provider"),
-        model=state.get("llm_model"),
-        temperature=state.get("llm_temperature"),
-    )
-    # Use llm directly (no JsonOutputParser) so we can apply our own
+    # Use model output directly (no JsonOutputParser) so we can apply our own
     # trailing-comma-tolerant parser that handles common LLM JSON quirks.
-    chain = _INSIGHT_PROMPT | llm
     stop_event = state.get("_stop_event")
 
     # Push live status immediately.
     _q = state.get("_agent_queue")
     if _q:
-        _q.put({"_type": "interim",
-                "status_message": "\U0001f52c LLM generating research insights\u2026"})
+        _q.put(
+            {
+                "_type": "interim",
+                "status_message": "\U0001f52c LLM generating research insights\u2026",
+            }
+        )
 
     # Non-blocking executor so a hung LLM call never freezes the pipeline.
     _INSIGHT_TIMEOUT = 120
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = executor.submit(
-        chain.invoke,
-        {"research_goal": research_goal,
-         "papers_json": json.dumps(paper_summaries, indent=2)},
+        invoke_with_provider_failover,
+        _INSIGHT_PROMPT,
+        {
+            "research_goal": research_goal,
+            "papers_json": json.dumps(paper_summaries, indent=2),
+        },
+        state.get("llm_provider"),
+        state.get("llm_model"),
+        state.get("llm_temperature"),
+        None,
     )
     try:
         deadline = _INSIGHT_TIMEOUT
@@ -134,15 +148,21 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
             if stop_event and stop_event.is_set():
                 logger.info("Insight generation cancelled by stop_event.")
                 executor.shutdown(wait=False)
-                return {**state, "insights": _fallback_insights(papers),
-                        "status_message": "\U0001f6d1 Search stopped."}
+                return {
+                    **state,
+                    "insights": _fallback_insights(papers),
+                    "status_message": "\U0001f6d1 Search stopped.",
+                }
             try:
                 raw_response = future.result(timeout=min(1.0, deadline))
                 break
             except concurrent.futures.TimeoutError:
                 deadline -= 1.0
         else:
-            logger.warning("Insight generation timed out after %ss \u2014 using fallback.", _INSIGHT_TIMEOUT)
+            logger.warning(
+                "Insight generation timed out after %ss \u2014 using fallback.",
+                _INSIGHT_TIMEOUT,
+            )
             insights = _fallback_insights(papers)
             raw_response = None
 
@@ -151,7 +171,9 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
             content = getattr(raw_response, "content", "") or str(raw_response)
             insights = robust_json_parse(content)
             if not insights:
-                logger.warning("Insight JSON parse returned empty dict — using fallback.")
+                logger.warning(
+                    "Insight JSON parse returned empty dict — using fallback."
+                )
                 insights = _fallback_insights(papers)
 
     except Exception as exc:
@@ -160,9 +182,11 @@ def generate_insights_node(state: "ResearchState") -> "ResearchState":
     finally:
         executor.shutdown(wait=False)  # never block on a hung LLM thread
 
-    logger.info("Insights generated: %d trends, %d gaps",
-                len(insights.get("emerging_trends", [])),
-                len(insights.get("research_gaps", [])))
+    logger.info(
+        "Insights generated: %d trends, %d gaps",
+        len(insights.get("emerging_trends", [])),
+        len(insights.get("research_gaps", [])),
+    )
 
     return {
         **state,
@@ -178,8 +202,12 @@ def _fallback_insights(papers: list[dict]) -> dict:
         "overview": f"Analysis of {len(papers)} papers in this research area.",
         "emerging_trends": ["Recent publications show active research in this area."],
         "common_challenges": ["See individual paper limitations for details."],
-        "research_gaps": ["Review the limitations sections of papers for identified gaps."],
-        "suggested_directions": ["Consider the most recent papers for current state-of-the-art."],
+        "research_gaps": [
+            "Review the limitations sections of papers for identified gaps."
+        ],
+        "suggested_directions": [
+            "Consider the most recent papers for current state-of-the-art."
+        ],
         "recommended_papers": [p.get("title", "")[:60] for p in papers[:3]],
         "maturity_level": "growing",
         "interdisciplinary_connections": [],

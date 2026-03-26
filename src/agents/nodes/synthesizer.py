@@ -7,6 +7,7 @@ For each ranked paper, generates a structured synthesis using the LLM:
   • limitations / drawbacks
   • future scope
 """
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -24,10 +25,19 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-_SYNTH_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are a research synthesis expert. Analyze the given paper metadata and abstract,
+_SYNTHESIS_KEYS = (
+    "summary",
+    "methodology",
+    "contribution",
+    "limitations",
+    "future_scope",
+)
+
+_SYNTH_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """You are a research synthesis expert. Analyze the given paper metadata and abstract,
 then produce a concise structured analysis.
 
 Return ONLY a valid JSON object:
@@ -40,10 +50,10 @@ Return ONLY a valid JSON object:
 }}
 
 If information is unavailable, state "Not specified in abstract." Be specific and technical.""",
-    ),
-    (
-        "human",
-        """Paper to analyze:
+        ),
+        (
+            "human",
+            """Paper to analyze:
 Title: {title}
 Authors: {authors}
 Year: {year}
@@ -53,8 +63,9 @@ Abstract: {abstract}
 Research context: {research_context}
 
 Return only the JSON object.""",
-    ),
-])
+        ),
+    ]
+)
 
 
 def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
@@ -62,12 +73,15 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
     LangGraph node: generate structured synthesis for each ranked paper.
     Updates state keys: synthesized_papers.
     """
-    from src.models.llm_factory import get_llm
+    from src.models.llm_factory import invoke_with_provider_failover
 
     papers = state.get("ranked_papers", [])
     if not papers:
-        return {**state, "synthesized_papers": [],
-                "status_message": "⚠️ No papers to synthesize."}
+        return {
+            **state,
+            "synthesized_papers": [],
+            "status_message": "⚠️ No papers to synthesize.",
+        }
 
     intent = state.get("parsed_intent", {})
     research_context = (
@@ -75,12 +89,7 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
         f"Problem: {intent.get('problem_statement', state.get('query', ''))[:200]}"
     )
 
-    llm = get_llm(
-        provider=state.get("llm_provider"),
-        model=state.get("llm_model"),
-        temperature=state.get("llm_temperature"),
-    )
-    chain = _SYNTH_PROMPT | llm | RobustJsonOutputParser()
+    parser = RobustJsonOutputParser()
 
     synthesized = []
     total = len(papers)
@@ -97,12 +106,20 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
             logger.info("Synthesis stopped early by user after %d/%d papers", i, total)
             break
 
-        logger.info("Synthesizing paper %d/%d: %s", i + 1, total,
-                    (paper.get("title") or "")[:60])
+        logger.info(
+            "Synthesizing paper %d/%d: %s",
+            i + 1,
+            total,
+            (paper.get("title") or "")[:60],
+        )
         if _q:
-            _q.put({"_type": "interim",
+            _q.put(
+                {
+                    "_type": "interim",
                     "status_message": f"🧪 Synthesising paper {i + 1}/{total}: "
-                                      f"{(paper.get('title') or '')[:50]}…"})
+                    f"{(paper.get('title') or '')[:50]}…",
+                }
+            )
         try:
             abstract = (paper.get("abstract") or "")[:1500]
             if not abstract:
@@ -121,7 +138,15 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
             # Use shutdown(wait=False) instead of 'with' context manager so a
             # timed-out thread is discarded immediately rather than blocking.
             ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = ex.submit(chain.invoke, payload)
+            future = ex.submit(
+                invoke_with_provider_failover,
+                _SYNTH_PROMPT,
+                payload,
+                state.get("llm_provider"),
+                state.get("llm_model"),
+                state.get("llm_temperature"),
+                parser,
+            )
             synthesis = None
             stop_fired = False
             try:
@@ -129,7 +154,14 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
                 while remaining > 0:
                     if stop_event and stop_event.is_set():
                         logger.info("Synthesis cancelled mid-paper by stop_event.")
-                        synthesized.append({**paper, "synthesis": _fallback_synthesis(paper)})
+                        synthesized.append(
+                            {
+                                **paper,
+                                "synthesis": _normalize_synthesis(
+                                    _fallback_synthesis(paper), paper
+                                ),
+                            }
+                        )
                         stop_fired = True
                         break
                     try:
@@ -138,7 +170,9 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
                     except concurrent.futures.TimeoutError:
                         remaining -= 1.0
                 if synthesis is None and not stop_fired:
-                    logger.warning("Synthesis timed out for paper %d — using fallback.", i + 1)
+                    logger.warning(
+                        "Synthesis timed out for paper %d — using fallback.", i + 1
+                    )
                     synthesis = _fallback_synthesis(paper)
             finally:
                 ex.shutdown(wait=False)  # never block on a hung LLM thread
@@ -147,6 +181,29 @@ def synthesize_papers_node(state: "ResearchState") -> "ResearchState":
         except Exception as exc:
             logger.warning("Synthesis failed for paper %d: %s", i + 1, exc)
             synthesis = _fallback_synthesis(paper)
+
+        synthesis = _normalize_synthesis(synthesis, paper)
+
+        # Log synthesis quality and whether fallback-like content is in use.
+        measured_fallback = False
+        if synthesis:
+            placeholders = [
+                "not specified",
+                "see original paper",
+                "not available",
+                "no abstract available",
+            ]
+            for k, v in synthesis.items():
+                if isinstance(v, str) and any(ph in v.lower() for ph in placeholders):
+                    measured_fallback = True
+                    break
+
+        logger.info(
+            "Paper %d synthesis: %s [fallback=%s]",
+            i + 1,
+            (synthesis.get("summary") or "<empty>")[:140],
+            measured_fallback,
+        )
 
         enriched_paper = {**paper, "synthesis": synthesis}
         synthesized.append(enriched_paper)
@@ -170,3 +227,27 @@ def _fallback_synthesis(paper: dict) -> dict:
         "limitations": "Not available.",
         "future_scope": "Not specified.",
     }
+
+
+def _normalize_synthesis(synthesis: dict | None, paper: dict) -> dict:
+    """Guarantee all synthesis sections exist and contain readable fallback text."""
+    abstract = (paper.get("abstract") or "").strip()
+    summary_fallback = abstract[:300] if abstract else "No abstract available."
+
+    normalized = dict(synthesis or {})
+    defaults = {
+        "summary": summary_fallback,
+        "methodology": "Not specified in abstract.",
+        "contribution": "Not specified in abstract.",
+        "limitations": "Not specified in abstract.",
+        "future_scope": "Not specified in abstract.",
+    }
+
+    for key in _SYNTHESIS_KEYS:
+        value = normalized.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if not value:
+            normalized[key] = defaults[key]
+
+    return {key: normalized[key] for key in _SYNTHESIS_KEYS}

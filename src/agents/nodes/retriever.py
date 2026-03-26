@@ -11,6 +11,7 @@ Key design choices:
 - Web-based journal sources tag results with their proper publisher name so the
   ranker can apply accurate credibility scores.
 """
+
 from __future__ import annotations
 
 import logging
@@ -22,44 +23,63 @@ if TYPE_CHECKING:
     from src.agents.state import ResearchState
 
 from config import settings
-from src.retrieval.arxiv_retriever import search_arxiv
-from src.retrieval.semantic_scholar import search_semantic_scholar
-from src.retrieval.crossref_retriever import search_crossref
-from src.retrieval.core_retriever import search_core
-from src.retrieval.web_retriever import search_web
+
+# from src.retrieval.arxiv_retriever import search_arxiv
+# from src.retrieval.semantic_scholar import search_semantic_scholar
+# from src.retrieval.crossref_retriever import search_crossref
+# from src.retrieval.core_retriever import search_core
+# from src.retrieval.web_retriever import search_web
+
+# More clean way to import all retrieval functions
+from src.retrieval import (
+    search_arxiv,
+    # search_semantic_scholar,  # disabled
+    search_crossref,
+    search_core,
+    search_web,
+)
 
 logger = logging.getLogger(__name__)
 
 # Source name → retrieval function mapping
 _SOURCE_FN_MAP = {
     # Structured academic APIs
-    "arxiv":            search_arxiv,
-    "semantic_scholar": search_semantic_scholar,
-    "crossref":         search_crossref,
-    "core":             search_core,
+    "arxiv": search_arxiv,
+    # "semantic_scholar": search_semantic_scholar,  # disabled temporarily
+    "crossref": search_crossref,
+    "core": search_core,
     # Journal / publisher web sources (all via search_web with site: operators)
-    "ieee_web":          search_web,
+    "ieee_web": search_web,
     "sciencedirect_web": search_web,
-    "mdpi_web":          search_web,
-    "nature_web":        search_web,
-    "acm_web":           search_web,
-    "springer_web":      search_web,
-    "pubmed_web":        search_web,
-    "openreview_web":    search_web,
+    "mdpi_web": search_web,
+    "nature_web": search_web,
+    "acm_web": search_web,
+    "springer_web": search_web,
+    "pubmed_web": search_web,
+    "openreview_web": search_web,
     # Generic web fallback (legacy key)
-    "web":               search_web,
+    "web": search_web,
 }
 
 # Semantic Scholar rate-limit buffer (skip in fast mode)
 _RATE_LIMIT_DELAY = {
-    "semantic_scholar": 1.0,
+    # "semantic_scholar": 1.0,
 }
 
 # Sources that are silently skipped when their API key is a placeholder / missing.
-_WEB_SOURCES = frozenset({
-    "ieee_web", "sciencedirect_web", "mdpi_web", "nature_web",
-    "acm_web", "springer_web", "pubmed_web", "openreview_web", "web",
-})
+_WEB_SOURCES = frozenset(
+    {
+        "ieee_web",
+        "sciencedirect_web",
+        "mdpi_web",
+        "nature_web",
+        "acm_web",
+        "springer_web",
+        "pubmed_web",
+        "openreview_web",
+        "web",
+    }
+)
 
 
 def _is_source_configured(src_name: str) -> bool:
@@ -80,14 +100,14 @@ def _is_source_configured(src_name: str) -> bool:
 
 # Source label override for web results — used by ranker SOURCE_CREDIBILITY
 _WEB_SOURCE_LABELS = {
-    "ieee_web":          "IEEE Xplore",
+    "ieee_web": "IEEE Xplore",
     "sciencedirect_web": "ScienceDirect",
-    "mdpi_web":          "MDPI",
-    "nature_web":        "Nature",
-    "acm_web":           "ACM Digital Library",
-    "springer_web":      "Springer",
-    "pubmed_web":        "PubMed",
-    "openreview_web":    "OpenReview",
+    "mdpi_web": "MDPI",
+    "nature_web": "Nature",
+    "acm_web": "ACM Digital Library",
+    "springer_web": "Springer",
+    "pubmed_web": "PubMed",
+    "openreview_web": "OpenReview",
 }
 
 
@@ -153,8 +173,11 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
             try:
                 results = fn(fallback_query, max_results=limit, offset=source_offset)
                 if results:
-                    logger.info("Source '%s': fallback query returned %d results",
-                                src_name, len(results))
+                    logger.info(
+                        "Source '%s': fallback query returned %d results",
+                        src_name,
+                        len(results),
+                    )
             except Exception as exc:
                 logger.warning("Source '%s' fallback query failed: %s", src_name, exc)
 
@@ -230,18 +253,30 @@ def retrieve_papers_node(state: "ResearchState") -> "ResearchState":
 
     # ── Year filtering ────────────────────────────────────────────────────────
     if year_after:
-        unique = [p for p in unique
-                  if not p.get("year") or int(p.get("year") or 0) >= year_after]
+        unique = [
+            p
+            for p in unique
+            if not p.get("year") or int(p.get("year") or 0) >= year_after
+        ]
     if year_max:
-        unique = [p for p in unique
-                  if not p.get("year") or int(p.get("year") or 0) <= year_max]
+        unique = [
+            p
+            for p in unique
+            if not p.get("year") or int(p.get("year") or 0) <= year_max
+        ]
 
     active_src = len([k for k, v in source_counts.items() if v > 0])
-    logger.info("Retrieval complete: %d unique papers from %d/%d active sources",
-                len(unique), active_src, len(threads))
+    logger.info(
+        "Retrieval complete: %d unique papers from %d/%d active sources",
+        len(unique),
+        active_src,
+        len(threads),
+    )
 
-    status = (f"\U0001f50d Retrieved **{len(unique)}** unique papers "
-              f"from {active_src} source(s)")
+    status = (
+        f"\U0001f50d Retrieved **{len(unique)}** unique papers "
+        f"from {active_src} source(s)"
+    )
     if errors:
         status += f" ({len(errors)} error(s))"
 

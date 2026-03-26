@@ -24,8 +24,12 @@ data/
 !data/.gitkeep
 
 # Vector stores
+# faiss indices may be present from older installs
 *.faiss
+# llama-index and other libraries create miscellaneous index files
 *.index
+# persist directories used by vector_memory
+vector_store/
 chroma/
 
 # Streamlit cache
@@ -47,3 +51,9 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+a.py
+a.ipynb
+test_llamacloud.py
+_check_exc.py
+instructions.md
