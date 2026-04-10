@@ -19,6 +19,7 @@ Workflow:
       ↓
   END
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 # ── Graph construction ────────────────────────────────────────────────────────
+
 
 def _build_graph() -> StateGraph:
     """Construct and compile the LangGraph StateGraph."""
@@ -89,6 +91,7 @@ def _get_graph():
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def run_research_agent(
     query: str,
     llm_provider: Optional[str] = None,
@@ -111,7 +114,7 @@ def run_research_agent(
     query : str
         User's research query (keywords, paragraph, abstract, etc.)
     llm_provider : str, optional
-        LLM provider override (openai | openrouter | gemini | anthropic | ollama)
+        LLM provider override (openai | openrouter | gemini | anthropic)
     llm_model : str, optional
         Model name override.
     memory_enabled : bool
@@ -232,5 +235,4 @@ def stream_research_agent(
             yield chunk
     except Exception as exc:
         logger.error("Stream failed: %s", exc, exc_info=True)
-        yield {**initial_state, "error": str(exc),
-               "status_message": f"❌ Error: {exc}"}
+        yield {**initial_state, "error": str(exc), "status_message": f"❌ Error: {exc}"}

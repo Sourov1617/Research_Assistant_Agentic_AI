@@ -2,6 +2,7 @@
 Central configuration loader.
 All credentials & settings are sourced exclusively from the .env file.
 """
+
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -23,7 +24,7 @@ def _get(key: str, default=None, cast=None):
 
 
 # ── LLM Provider ──────────────────────────────────────────────────────────────
-LLM_PROVIDER: str = _get("LLM_PROVIDER", "openai")
+LLM_PROVIDER: str = _get("LLM_PROVIDER", "gemini")
 DEFAULT_MODEL: str = _get("DEFAULT_MODEL", "gpt-4o-mini")
 LLM_TEMPERATURE: float = _get("LLM_TEMPERATURE", 0.2, float)
 
@@ -31,6 +32,17 @@ LLM_TEMPERATURE: float = _get("LLM_TEMPERATURE", 0.2, float)
 OPENAI_API_KEY: str = _get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL: str = _get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_DEFAULT_MODEL: str = _get("OPENAI_DEFAULT_MODEL", "gpt-4o-mini")
+
+# ── Azure OpenAI ──────────────────────────────────────────────────────────────
+AZURE_OPENAI_API_KEY: str = _get("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_ENDPOINT: str = _get("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_API_VERSION: str = _get(
+    "AZURE_OPENAI_API_VERSION", "2025-01-01-preview"
+)
+AZURE_OPENAI_DEPLOYMENT: str = _get("AZURE_OPENAI_DEPLOYMENT", "gpt-35-turbo")
+AZURE_OPENAI_DEFAULT_MODEL: str = _get(
+    "AZURE_OPENAI_DEFAULT_MODEL", "gpt-4.1-mini"
+)
 
 # ── OpenRouter ────────────────────────────────────────────────────────────────
 OPENROUTER_API_KEY: str = _get("OPENROUTER_API_KEY", "")
@@ -41,17 +53,18 @@ OPENROUTER_DEFAULT_MODEL: str = _get(
 
 # ── Google Gemini ─────────────────────────────────────────────────────────────
 GOOGLE_API_KEY: str = _get("GOOGLE_API_KEY", "")
-GEMINI_BASE_URL: str = _get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
-GEMINI_DEFAULT_MODEL: str = _get("GEMINI_DEFAULT_MODEL", "gemini-2.0-flash")
+GEMINI_BASE_URL: str = _get(
+    "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com"
+)
+GEMINI_DEFAULT_MODEL: str = _get("GEMINI_DEFAULT_MODEL", "gemini-2.5-flash")
 
 # ── Anthropic ─────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY: str = _get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_BASE_URL: str = _get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-ANTHROPIC_DEFAULT_MODEL: str = _get("ANTHROPIC_DEFAULT_MODEL", "claude-3-haiku-20240307")
+ANTHROPIC_DEFAULT_MODEL: str = _get(
+    "ANTHROPIC_DEFAULT_MODEL", "claude-3-haiku-20240307"
+)
 
-# ── Ollama (local) ────────────────────────────────────────────────────────────
-OLLAMA_BASE_URL: str = _get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_DEFAULT_MODEL: str = _get("OLLAMA_DEFAULT_MODEL", "llama3.2")
 
 # ── Semantic Scholar ──────────────────────────────────────────────────────────
 SEMANTIC_SCHOLAR_API_KEY: str = _get("SEMANTIC_SCHOLAR_API_KEY", "")
@@ -86,6 +99,16 @@ EMBEDDING_PROVIDER: str = _get("EMBEDDING_PROVIDER", "huggingface")
 EMBEDDING_MODEL: str = _get("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 OPENAI_EMBEDDING_MODEL: str = _get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
+# ── GROQ (Groq.ai) ───────────────────────────────────────────────────────────
+GROQ_API_KEY: str = _get("GROQ_API_KEY", "")
+GROQ_BASE_URL: str = _get("GROQ_BASE_URL", "https://api.groq.ai/v1")
+GROQ_DEFAULT_MODEL: str = _get("GROQ_DEFAULT_MODEL", "groq/compound")
+
+# ── llama‑index / LlamaCloud settings ---------------------------------------
+LLAMA_CLOUD_API_KEY: str = _get("LLAMA_CLOUD_API_KEY", "")
+LLAMA_CLOUD_INDEX_NAME: str = _get("LLAMA_CLOUD_INDEX_NAME", "research_papers")
+LLAMA_CLOUD_PROJECT_NAME: str = _get("LLAMA_CLOUD_PROJECT_NAME", "Default")
+
 # ── Memory ────────────────────────────────────────────────────────────────────
 MEMORY_ENABLED_DEFAULT: bool = _get("MEMORY_ENABLED_DEFAULT", False, bool)
 MEMORY_BACKEND: str = _get("MEMORY_BACKEND", "sqlite")
@@ -96,8 +119,10 @@ MAX_PAPERS_IN_MEMORY: int = _get("MAX_PAPERS_IN_MEMORY", 100, int)
 
 # ── Agent Behavior ────────────────────────────────────────────────────────────
 MAX_PAPERS_PER_SOURCE: int = _get("MAX_PAPERS_PER_SOURCE", 10, int)
-MAX_RANKED_PAPERS: int = _get("MAX_RANKED_PAPERS", 50, int)      # rank top 50; UI paginates
-MIN_RELEVANCE_SCORE: float = _get("MIN_RELEVANCE_SCORE", 0.05, float)  # lower bar so journals aren't dropped
+MAX_RANKED_PAPERS: int = _get("MAX_RANKED_PAPERS", 50, int)  # rank top 50; UI paginates
+MIN_RELEVANCE_SCORE: float = _get(
+    "MIN_RELEVANCE_SCORE", 0.05, float
+)  # lower bar so journals aren't dropped
 MAX_SYNTHESIS_TOKENS: int = _get("MAX_SYNTHESIS_TOKENS", 500, int)
 MAX_INSIGHTS_TOKENS: int = _get("MAX_INSIGHTS_TOKENS", 800, int)
 
@@ -108,6 +133,14 @@ APP_THEME: str = _get("APP_THEME", "dark")
 MAX_QUERY_LENGTH: int = _get("MAX_QUERY_LENGTH", 5000, int)
 DEBUG_MODE: bool = _get("DEBUG_MODE", False, bool)
 
+# ── API / Streaming ───────────────────────────────────────────────────────────
+API_CORS_ORIGINS: str = _get("API_CORS_ORIGINS", "*")
+
+# ── Kafka / Event Streaming ───────────────────────────────────────────────────
+KAFKA_ENABLED: bool = _get("KAFKA_ENABLED", True, bool)
+KAFKA_BOOTSTRAP_SERVERS: str = _get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC_PREFIX: str = _get("KAFKA_TOPIC_PREFIX", "research_assistant")
+
 # ── Derived paths (ensure directories are created at runtime) ─────────────────
 SQLITE_DB_PATH = str(_ROOT / SQLITE_DB_PATH.lstrip("./"))
 JSON_MEMORY_PATH = str(_ROOT / JSON_MEMORY_PATH.lstrip("./"))
@@ -116,16 +149,18 @@ VECTOR_STORE_PATH = str(_ROOT / VECTOR_STORE_PATH.lstrip("./"))
 # ── Provider → model map (convenience) ───────────────────────────────────────
 PROVIDER_DEFAULT_MODELS = {
     "openai": OPENAI_DEFAULT_MODEL,
+    "azure_openai": AZURE_OPENAI_DEFAULT_MODEL,
     "openrouter": OPENROUTER_DEFAULT_MODEL,
     "gemini": GEMINI_DEFAULT_MODEL,
     "anthropic": ANTHROPIC_DEFAULT_MODEL,
-    "ollama": OLLAMA_DEFAULT_MODEL,
+    "groq": GROQ_DEFAULT_MODEL,
 }
 
 PROVIDER_API_KEYS = {
     "openai": OPENAI_API_KEY,
+    "azure_openai": AZURE_OPENAI_API_KEY,
     "openrouter": OPENROUTER_API_KEY,
     "gemini": GOOGLE_API_KEY,
     "anthropic": ANTHROPIC_API_KEY,
-    "ollama": None,  # No key needed for local Ollama
+    "groq": GROQ_API_KEY,
 }

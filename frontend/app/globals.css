@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: "Trebuchet MS", "Avenir Next", "Segoe UI", sans-serif;
+  --font-mono: "Consolas", "SFMono-Regular", monospace;
+}
+
+body {
+  min-height: 100vh;
+  background: linear-gradient(180deg, #fcfcfb 0%, #f7f1e8 45%, #eef6fb 100%);
+  color: #0c0a09;
+  font-family: var(--font-sans);
+}

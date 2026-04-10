@@ -3,6 +3,7 @@ Search Planner Node
 Generates ONE highly-targeted query per source based on parsed research intent.
 Fewer, more precise requests = better relevance + lower rate-limit pressure.
 """
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -20,10 +21,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 CURRENT_YEAR = datetime.now().year
 
-_PLAN_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are a research librarian. Output a JSON search plan.
+_PLAN_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """You are a research librarian. Output a JSON search plan.
 
 RULES:
 1. Each source has "query" (topic + methods) and "topic_query" (topic ONLY, NO model/optimizer names).
@@ -68,12 +70,13 @@ OUTPUT — valid JSON only, no markdown fences:
   "year_after": {year_after},
   "rationale": "one sentence"
 }}""",
-    ),
-    (
-        "human",
-        "Parsed research intent:\n{intent_json}\n\nReturn the JSON only.",
-    ),
-])
+        ),
+        (
+            "human",
+            "Parsed research intent:\n{intent_json}\n\nReturn the JSON only.",
+        ),
+    ]
+)
 
 
 def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
@@ -81,7 +84,7 @@ def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
     LangGraph node: produce one precise query per source from parsed intent.
     Updates state keys: search_plan, status_message.
     """
-    from src.models.llm_factory import get_llm
+    from src.models.llm_factory import invoke_with_provider_failover
 
     intent = state.get("parsed_intent", {})
     year_min = state.get("year_min")
@@ -104,22 +107,24 @@ def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
     if not intent:
         plan = _default_plan(state.get("query", ""), year_after=year_after)
         _apply_enabled_sources(plan, state.get("enabled_sources"))
-        return {**state, "search_plan": plan,
-                "status_message": "⚠️ Using default search plan."}
+        return {
+            **state,
+            "search_plan": plan,
+            "status_message": "⚠️ Using default search plan.",
+        }
 
-    llm = get_llm(
-        provider=state.get("llm_provider"),
-        model=state.get("llm_model"),
-        temperature=state.get("llm_temperature"),
-    )
-    chain = _PLAN_PROMPT | llm | RobustJsonOutputParser()
+    parser = RobustJsonOutputParser()
     stop_event = state.get("_stop_event")
 
     # Push live status so user sees activity immediately while LLM thinks.
     _q = state.get("_agent_queue")
     if _q:
-        _q.put({"_type": "interim",
-                "status_message": "📋 LLM building search plan — may take 1–2 min for large models…"})
+        _q.put(
+            {
+                "_type": "interim",
+                "status_message": "📋 LLM building search plan — may take 1–2 min for large models…",
+            }
+        )
 
     # Run with a hard timeout so a completely broken provider never blocks the
     # pipeline. 120 s is generous enough for large reasoning models.
@@ -131,8 +136,13 @@ def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
     _LLM_TIMEOUT = 120  # seconds
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     future = executor.submit(
-        chain.invoke,
+        invoke_with_provider_failover,
+        _PLAN_PROMPT,
         {"intent_json": json.dumps(intent, indent=2), "year_after": year_after},
+        state.get("llm_provider"),
+        state.get("llm_model"),
+        state.get("llm_temperature"),
+        parser,
     )
     try:
         deadline = _LLM_TIMEOUT
@@ -140,18 +150,27 @@ def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
             if stop_event and stop_event.is_set():
                 logger.info("Search planning cancelled by stop_event.")
                 executor.shutdown(wait=False)
-                fallback = _default_plan(state.get("query", ""), intent, year_after=year_after)
+                fallback = _default_plan(
+                    state.get("query", ""), intent, year_after=year_after
+                )
                 _apply_enabled_sources(fallback, state.get("enabled_sources"))
-                return {**state, "search_plan": fallback,
-                        "status_message": "🛑 Search stopped."}
+                return {
+                    **state,
+                    "search_plan": fallback,
+                    "status_message": "🛑 Search stopped.",
+                }
             try:
                 plan = future.result(timeout=min(1.0, deadline))
                 # RobustJsonOutputParser returns {} on silent parse failure —
                 # that produces a sources-less plan which would send 0 queries.
                 # Fall back to the default plan whenever sources is absent/empty.
                 if not plan or not plan.get("sources"):
-                    logger.warning("Search plan LLM returned empty/invalid JSON — using default plan.")
-                    plan = _default_plan(state.get("query", ""), intent, year_after=year_after)
+                    logger.warning(
+                        "Search plan LLM returned empty/invalid JSON — using default plan."
+                    )
+                    plan = _default_plan(
+                        state.get("query", ""), intent, year_after=year_after
+                    )
                 plan["year_after"] = year_after
                 if state.get("year_max"):
                     plan["year_max"] = state["year_max"]
@@ -159,7 +178,10 @@ def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
             except concurrent.futures.TimeoutError:
                 deadline -= 1.0
         else:
-            logger.warning("Search plan generation timed out after %ss — using default plan.", _LLM_TIMEOUT)
+            logger.warning(
+                "Search plan generation timed out after %ss — using default plan.",
+                _LLM_TIMEOUT,
+            )
             plan = _default_plan(state.get("query", ""), intent, year_after=year_after)
     except Exception as exc:
         logger.error("Search plan generation failed: %s", exc)
@@ -171,7 +193,8 @@ def generate_search_plan_node(state: "ResearchState") -> "ResearchState":
     _apply_enabled_sources(plan, state.get("enabled_sources"))
 
     enabled_count = sum(
-        1 for v in plan.get("sources", {}).values()
+        1
+        for v in plan.get("sources", {}).values()
         if isinstance(v, dict) and v.get("enabled", False)
     )
     logger.info("Search plan: %d sources, year_after=%d", enabled_count, year_after)
@@ -214,18 +237,33 @@ def _default_plan(query: str, intent: dict = None, year_after: int = 2019) -> di
 
     return {
         "sources": {
-            "arxiv":            {"enabled": True, "query": primary, "categories": []},
-            "semantic_scholar": {"enabled": True, "query": primary},
-            "crossref":         {"enabled": True, "query": primary},
-            "core":             {"enabled": True, "query": primary},
-            "ieee_web":         {"enabled": True,  "query": f"{primary} site:ieeexplore.ieee.org"},
-            "sciencedirect_web":{"enabled": True,  "query": f"{primary} site:sciencedirect.com"},
-            "mdpi_web":         {"enabled": True,  "query": f"{primary} site:mdpi.com"},
-            "nature_web":       {"enabled": True,  "query": f"{primary} site:nature.com"},
-            "acm_web":          {"enabled": True,  "query": f"{primary} site:dl.acm.org"},
-            "springer_web":     {"enabled": True,  "query": f"{primary} site:link.springer.com"},
-            "pubmed_web":       {"enabled": False, "query": f"{primary} site:pubmed.ncbi.nlm.nih.gov"},
-            "openreview_web":   {"enabled": True,  "query": f"{primary} site:openreview.net"},
+            "arxiv": {"enabled": True, "query": primary, "categories": []},
+            # "semantic_scholar": {"enabled": False, "query": primary},
+            "crossref": {"enabled": True, "query": primary},
+            "core": {"enabled": True, "query": primary},
+            "ieee_web": {
+                "enabled": True,
+                "query": f"{primary} site:ieeexplore.ieee.org",
+            },
+            "sciencedirect_web": {
+                "enabled": True,
+                "query": f"{primary} site:sciencedirect.com",
+            },
+            "mdpi_web": {"enabled": True, "query": f"{primary} site:mdpi.com"},
+            "nature_web": {"enabled": True, "query": f"{primary} site:nature.com"},
+            "acm_web": {"enabled": True, "query": f"{primary} site:dl.acm.org"},
+            "springer_web": {
+                "enabled": True,
+                "query": f"{primary} site:link.springer.com",
+            },
+            "pubmed_web": {
+                "enabled": False,
+                "query": f"{primary} site:pubmed.ncbi.nlm.nih.gov",
+            },
+            "openreview_web": {
+                "enabled": True,
+                "query": f"{primary} site:openreview.net",
+            },
         },
         "primary_keywords": kws[:8],
         "year_after": year_after,

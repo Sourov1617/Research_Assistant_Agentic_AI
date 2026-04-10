@@ -1,8 +1,9 @@
 # 🔬 Intelligent Research Discovery & Synthesis Agent
 
-> **Advanced AI-powered academic literature discovery** — far beyond Google Scholar.
-> Understands your research intent, searches multiple academic databases, ranks results,
-> synthesizes each paper, and generates research insights automatically.
+> **Advanced AI-powered academic literature discovery** — far beyond Google
+> Scholar. Understands your research intent, searches multiple academic
+> databases, ranks results, synthesizes each paper, and generates research
+> insights automatically.
 
 Built with **LangChain**, **LangGraph**, and **Streamlit**.
 
@@ -10,17 +11,16 @@ Built with **LangChain**, **LangGraph**, and **Streamlit**.
 
 ## 🌟 Features
 
-| Feature | Description |
-|---|---|
+| Feature                          | Description                                                               |
+| -------------------------------- | ------------------------------------------------------------------------- |
 | 🧠 **Smart Query Understanding** | Understands paragraphs, problem statements, abstracts — not just keywords |
-| 🔍 **Multi-Source Search** | arXiv, Semantic Scholar, CrossRef, CORE, Web (Tavily/DuckDuckGo) |
-| 📊 **Intelligent Ranking** | Scores by relevance, recency, citations, and source credibility |
-| 🧪 **Paper Synthesis** | Summary, methodology, key contribution, limitations, future scope |
-| 🔬 **Research Insights** | Emerging trends, research gaps, unexplored areas, suggested directions |
-| 💾 **Optional Memory** | Remembers past sessions, tracks research evolution, suggests next steps |
-| 🤖 **Multi-LLM Support** | OpenAI, OpenRouter, Gemini, Anthropic, or local Ollama |
-| ⚡ **Ollama Auto-Detection** | Locally installed Ollama models appear automatically in the UI |
-| 📥 **Export** | Download results as Markdown or JSON |
+| 🔍 **Multi-Source Search**       | arXiv, Semantic Scholar, CrossRef, CORE, Web (Tavily/DuckDuckGo)          |
+| 📊 **Intelligent Ranking**       | Scores by relevance, recency, citations, and source credibility           |
+| 🧪 **Paper Synthesis**           | Summary, methodology, key contribution, limitations, future scope         |
+| 🔬 **Research Insights**         | Emerging trends, research gaps, unexplored areas, suggested directions    |
+| 💾 **Optional Memory**           | Remembers past sessions, tracks research evolution, suggests next steps   |
+| 🤖 **Multi-LLM Support**         | OpenAI, OpenRouter, Gemini, or Anthropic                                  |
+| 📥 **Export**                    | Download results as Markdown or JSON                                      |
 
 ---
 
@@ -78,15 +78,14 @@ Research_Assistant_Agentic_AI/
 │   │   └── web_retriever.py        # Tavily / DuckDuckGo web search
 │   ├── memory/
 │   │   ├── sqlite_memory.py        # SQLite session & paper history
-│   │   └── vector_memory.py        # FAISS/Chroma paper embeddings
+│   │   └── vector_memory.py        # llama-index / LlamaCloud paper embeddings
 │   ├── models/
 │   │   └── llm_factory.py          # Multi-provider LLM builder
 │   └── utils/
-│       ├── ollama_utils.py         # Ollama auto-detection
 │       └── formatters.py           # Markdown report formatters
 └── data/
     ├── memory/                     # SQLite DB + JSON session files
-    └── vector_store/               # FAISS/Chroma embeddings
+    └── vector_store/               # persisted llama-index or legacy stores
 ```
 
 ---
@@ -111,7 +110,6 @@ OPENAI_API_KEY=sk-...
 OPENROUTER_API_KEY=sk-or-...
 # OR
 GOOGLE_API_KEY=AIza...
-# OR use local Ollama (no key needed — just install Ollama)
 
 # For web search (optional but recommended)
 TAVILY_API_KEY=tvly-...     # https://tavily.com (free tier available)
@@ -133,40 +131,26 @@ Then open **http://localhost:8501** in your browser.
 
 ## 🤖 LLM Provider Setup
 
-| Provider | Where to get key | Free tier? |
-|---|---|---|
-| **OpenAI** | https://platform.openai.com | Paid |
-| **OpenRouter** | https://openrouter.ai/keys | ✅ Many free models |
-| **Google Gemini** | https://aistudio.google.com | ✅ Free tier |
-| **Anthropic** | https://console.anthropic.com | Paid |
-| **Ollama** | https://ollama.ai (install locally) | ✅ 100% free & offline |
+| Provider          | Where to get key              | Free tier?          |
+| ----------------- | ----------------------------- | ------------------- |
+| **OpenAI**        | https://platform.openai.com   | Paid                |
+| **OpenRouter**    | https://openrouter.ai/keys    | ✅ Many free models |
+| **Google Gemini** | https://aistudio.google.com   | ✅ Free tier        |
+| **Anthropic**     | https://console.anthropic.com | Paid                |
 
-> 💡 **Tip:** For a fully free setup, use **OpenRouter** (free models like Llama 3.1, Gemma 2) or install **Ollama** locally.
-
-### 🦙 Using Ollama
-
-```bash
-# Install Ollama from https://ollama.ai
-ollama pull llama3.2       # 2GB — good general model
-ollama pull mistral        # 4GB — great for research tasks
-ollama pull phi3           # 2GB — fast & capable
-ollama serve               # Start the server (if not auto-started)
-```
-
-Ollama models are **automatically detected** and listed in the UI dropdown.
-
----
+> 💡 **Tip:** For a fully free setup, use **OpenRouter** (free models like Llama
+> 3.1, Gemma 2) on OpenRouter.
 
 ## 📡 Data Sources
 
-| Source | Type | Key Required | Notes |
-|---|---|---|---|
-| **arXiv** | Academic preprints | No | 2M+ papers, CS/Math/Physics/Bio |
-| **Semantic Scholar** | Academic papers | Optional | 200M+ papers, citation data |
-| **CrossRef** | DOI metadata | No (email for polite pool) | Journal articles |
-| **CORE** | Open access | Yes (free) | 200M+ open access papers |
-| **Tavily** | Web + industry | Yes (free tier) | Blogs, GitHub, industry sites |
-| **DuckDuckGo** | Web fallback | No | Always available |
+| Source               | Type               | Key Required               | Notes                           |
+| -------------------- | ------------------ | -------------------------- | ------------------------------- |
+| **arXiv**            | Academic preprints | No                         | 2M+ papers, CS/Math/Physics/Bio |
+| **Semantic Scholar** | Academic papers    | Optional                   | 200M+ papers, citation data     |
+| **CrossRef**         | DOI metadata       | No (email for polite pool) | Journal articles                |
+| **CORE**             | Open access        | Yes (free)                 | 200M+ open access papers        |
+| **Tavily**           | Web + industry     | Yes (free tier)            | Blogs, GitHub, industry sites   |
+| **DuckDuckGo**       | Web fallback       | No                         | Always available                |
 
 ---
 
@@ -204,7 +188,8 @@ Keywords: plant disease, edge computing, lightweight CNN, MobileNet, real-time
 - **LangChain** — LLM chains, prompts, output parsers
 - **LangGraph** — Stateful multi-node agent workflow
 - **Streamlit** — Interactive web UI
-- **FAISS / ChromaDB** — Vector memory for paper embeddings
+- **llama-index / LlamaCloud** — Vector memory & embeddings (replaces
+  FAISS/Chroma)
 - **SQLite** — Conversation & session persistence
 - **arXiv / Semantic Scholar / CrossRef / CORE** — Academic paper sources
 - **Tavily / DuckDuckGo** — Web & industry search
@@ -218,14 +203,14 @@ See [`.env.example`](.env.example) for the full annotated reference.
 
 Key settings:
 
-| Variable | Default | Description |
-|---|---|---|
-| `LLM_PROVIDER` | `openai` | Active LLM provider |
-| `MAX_PAPERS_PER_SOURCE` | `10` | Papers fetched per source |
-| `MAX_RANKED_PAPERS` | `15` | Papers after ranking |
-| `MEMORY_ENABLED_DEFAULT` | `false` | Default memory toggle state |
-| `VECTOR_STORE_TYPE` | `faiss` | `faiss` or `chroma` |
-| `EMBEDDING_PROVIDER` | `huggingface` | `huggingface`, `openai`, or `ollama` |
+| Variable                 | Default       | Description                                              |
+| ------------------------ | ------------- | -------------------------------------------------------- |
+| `LLM_PROVIDER`           | `openai`      | Active LLM provider                                      |
+| `MAX_PAPERS_PER_SOURCE`  | `10`          | Papers fetched per source                                |
+| `MAX_RANKED_PAPERS`      | `15`          | Papers after ranking                                     |
+| `MEMORY_ENABLED_DEFAULT` | `false`       | Default memory toggle state                              |
+| `VECTOR_STORE_TYPE`      | `llamaindex`  | `llamaindex`, `llamacloud`, `faiss`, or `chroma`         |
+| `EMBEDDING_PROVIDER`     | `huggingface` | `huggingface` or `openai` (only used by legacy backends) |
 
 ---
 

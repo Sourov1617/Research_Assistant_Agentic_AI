@@ -1,0 +1,384 @@
+Research Assistant API Endpoint Reference
+========================================
+
+Base server
+-----------
+- Local dev default: http://localhost:8000
+- OpenAPI docs: /docs
+- ReDoc: /redoc
+
+
+Recommended frontend flow
+-------------------------
+1. Call GET /config on app load.
+2. Render providers, models, sources, defaults from that response.
+3. Start a run with POST /research/jobs.
+4. Subscribe to GET /research/jobs/{job_id}/events using Server-Sent Events.
+5. Use GET /research/jobs/{job_id} as a fallback snapshot/polling endpoint.
+6. Use POST /research/jobs/{job_id}/stop to cancel a running job.
+7. Use /memory/sessions endpoints for history, saved sessions, and session detail screens.
+
+
+Endpoint list
+-------------
+
+GET /
+- Purpose: basic API metadata.
+- Response:
+  {
+    "name": "Research Assistant API",
+    "version": "1.0.0",
+    "docs": "/docs",
+    "health": "/health"
+  }
+
+
+GET /health
+- Purpose: health check for frontend boot and deployment probes.
+- Response fields:
+  - status
+  - app_title
+  - vector_store_type
+  - memory_backend
+  - kafka_enabled
+
+
+GET /config
+- Purpose: main bootstrap endpoint for frontend configuration.
+- Use this first instead of hardcoding provider/model/source lists.
+- Response shape:
+  {
+    "app": {
+      "title": string,
+      "theme": string,
+      "max_query_length": number
+    },
+    "defaults": {
+      "llm_provider": string,
+      "llm_model": string,
+      "llm_temperature": number,
+      "memory_enabled": boolean,
+      "fast_mode": boolean,
+      "year_min": number | null,
+      "year_max": number | null
+    },
+    "providers": string[],
+    "models": {
+      "<provider>": string[]
+    },
+    "sources": SourceOption[],
+    "streaming": {
+      "sse_endpoint_template": "/research/jobs/{job_id}/events",
+      "polling_endpoint_template": "/research/jobs/{job_id}"
+    },
+    "memory": {
+      "enabled_default": boolean,
+      "backend": string
+    },
+    "kafka": {
+      "enabled": boolean,
+      "topic_prefix": string
+    }
+  }
+
+SourceOption
+- key: string
+- label: string
+- enabled_by_default: boolean
+
+
+GET /providers
+- Purpose: lightweight provider list.
+- Response:
+  {
+    "providers": string[]
+  }
+
+
+GET /models/{provider}
+- Purpose: get models for a single provider.
+- Path param:
+  - provider: string
+- Response:
+  {
+    "models": string[]
+  }
+
+
+GET /sources
+- Purpose: lightweight source list for filters/toggles.
+- Response:
+  {
+    "sources": SourceOption[]
+  }
+
+
+POST /research/run
+- Purpose: synchronous full run.
+- Best for internal tools or debugging.
+- Not recommended for the main interactive frontend because long requests may block.
+- Request body:
+  {
+    "query": string,
+    "llm_provider": string | null,
+    "llm_model": string | null,
+    "llm_temperature": number | null,
+    "memory_enabled": boolean,
+    "session_id": string | null,
+    "year_min": number | null,
+    "year_max": number | null,
+    "fast_mode": boolean,
+    "enabled_sources": string[] | null,
+    "fetch_round": number
+  }
+- Response:
+  {
+    "status": "complete",
+    "state": ResearchState
+  }
+
+
+POST /research
+POST /research/jobs
+- Purpose: start an async research job.
+- Recommended main entrypoint for the frontend.
+- Request body:
+  {
+    "query": string,
+    "llm_provider": string | null,
+    "llm_model": string | null,
+    "llm_temperature": number | null,
+    "memory_enabled": boolean,
+    "session_id": string | null,
+    "year_min": number | null,
+    "year_max": number | null,
+    "fast_mode": boolean,
+    "enabled_sources": string[] | null,
+    "fetch_round": number
+  }
+- Notes:
+  - `query` is required and must be at least 1 character.
+  - if `enabled_sources` is omitted, backend uses default enabled sources.
+  - use `fetch_round=0` for first run.
+  - use `fetch_round=1,2,...` for "fetch more" style pagination rounds.
+  - if `memory_enabled=true`, pass a `session_id` to continue the same memory thread.
+- Response:
+  {
+    "job_id": string,
+    "status": "queued"
+  }
+
+
+GET /research/{job_id}
+GET /research/jobs/{job_id}
+- Purpose: get latest snapshot of a job.
+- Response:
+  {
+    "id": string,
+    "status": "queued" | "running" | "stopping" | "stopped" | "complete" | "error",
+    "state": ResearchState | null,
+    "error": string | null,
+    "request": object,
+    "created_at": string,
+    "updated_at": string
+  }
+
+
+GET /research/{job_id}/events
+GET /research/jobs/{job_id}/events
+- Purpose: live job event stream using SSE.
+- Content-Type: text/event-stream
+- Recommended frontend usage:
+  - create EventSource with this URL
+  - listen for event types: snapshot, started, interim, state, complete, error, stopped, heartbeat
+  - close the EventSource when complete/error/stopped is received
+- Event format:
+  event: <event_name>
+  data: {"job_id":"...","event":"...","timestamp":"...","data":{...}}
+
+- Event meanings:
+  - snapshot: immediate current job snapshot after subscription
+  - started: job thread entered running state
+  - interim: queue-based node progress messages pushed from inside agent nodes
+  - state: latest full/sanitized research state from LangGraph stream
+  - complete: terminal success event
+  - error: terminal failure event
+  - stopped: terminal user-stop event
+  - heartbeat: keepalive event when there has been no recent update
+
+
+GET /research/jobs/{job_id}/events/recent
+- Purpose: fetch recent buffered events for debugging or reconnect helpers.
+- Response:
+  {
+    "job_id": string,
+    "events": EventEnvelope[]
+  }
+
+EventEnvelope
+- job_id: string
+- event: string
+- timestamp: string
+- data: object
+
+
+POST /research/{job_id}/stop
+POST /research/jobs/{job_id}/stop
+- Purpose: request cancellation of a running job.
+- Response:
+  {
+    "job_id": string,
+    "status": "stopping"
+  }
+- Frontend behavior:
+  - after calling this, keep listening on SSE until `stopped` arrives
+  - if using polling fallback, keep polling until status becomes `stopped`
+
+
+Memory endpoints
+----------------
+
+GET /memory/sessions
+- Purpose: list saved memory sessions.
+- Response:
+  {
+    "sessions": SessionSummary[]
+  }
+
+SessionSummary
+- session_id: string
+- created_at: string
+- updated_at: string
+- title: string
+- meta_json: string
+
+
+POST /memory/sessions
+- Purpose: create a memory session ahead of a run.
+- Request:
+  {
+    "title": string
+  }
+- Response:
+  {
+    "session_id": string
+  }
+
+
+GET /memory/sessions/{session_id}
+- Purpose: fetch full session detail for history screens.
+- Response:
+  {
+    "session": SessionSummary,
+    "messages": Message[],
+    "papers": Paper[],
+    "insights": InsightRecord[]
+  }
+
+Message
+- role: string
+- content: string
+- created_at: string
+
+Paper
+- backend returns stored paper fields from sqlite, commonly:
+  - id
+  - session_id
+  - title
+  - authors
+  - year
+  - url
+  - source
+  - citation_count
+  - added_at
+
+InsightRecord
+- id
+- session_id
+- query
+- insights_json
+- created_at
+- insights
+
+
+DELETE /memory/sessions/{session_id}
+- Purpose: delete a session and its related history.
+- Response:
+  {
+    "session_id": string,
+    "deleted": true
+  }
+
+
+ResearchState fields frontend should expect
+-------------------------------------------
+- query: string
+- llm_provider: string | null
+- llm_model: string | null
+- llm_temperature: number | null
+- memory_enabled: boolean
+- session_id: string | null
+- year_min: number | null
+- year_max: number | null
+- fast_mode: boolean | null
+- enabled_sources: string[] | null
+- fetch_round: number | null
+- parsed_intent: object
+- search_plan: object
+- papers: array
+- ranked_papers: array
+- synthesized_papers: array
+- insights: object
+- memory_suggestions: array
+- status_message: string
+- final_output: string | null
+- error: string | null
+
+
+Frontend integration notes
+--------------------------
+- Prefer SSE over polling for the main results page.
+- Keep GET /research/jobs/{job_id} as reconnect fallback and for page refresh restore.
+- Treat `status_message` as the main live progress label.
+- Use `synthesized_papers` if present; otherwise fall back to `ranked_papers`.
+- For "fetch more", reuse the same query and filters but increment `fetch_round`.
+- For memory-enabled chat/research continuity, persist `session_id` in the frontend.
+- The backend sanitizes internal fields that start with `_`, so frontend will not see thread or queue internals.
+
+
+Suggested frontend state machine
+--------------------------------
+- idle
+- queued
+- running
+- stopping
+- stopped
+- complete
+- error
+
+
+Suggested EventSource example
+-----------------------------
+const es = new EventSource(`/api/research/jobs/${jobId}/events`);
+
+es.addEventListener("snapshot", (evt) => { ... });
+es.addEventListener("interim", (evt) => { ... });
+es.addEventListener("state", (evt) => { ... });
+es.addEventListener("complete", (evt) => { es.close(); });
+es.addEventListener("error", (evt) => { es.close(); });
+es.addEventListener("stopped", (evt) => { es.close(); });
+
+
+Current source keys
+-------------------
+- arxiv
+- crossref
+- core
+- ieee_web
+- sciencedirect_web
+- mdpi_web
+- nature_web
+- acm_web
+- springer_web
+- openreview_web
+

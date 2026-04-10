@@ -2,6 +2,7 @@
 Research Discovery & Synthesis Agent — Streamlit Frontend
 Run: streamlit run app.py
 """
+
 from __future__ import annotations
 
 import sys
@@ -24,6 +25,7 @@ if str(ROOT) not in sys.path:
 # Inject them before any LangChain sub-package is imported so the AttributeError
 # ('module langchain has no attribute debug') never occurs.
 import langchain as _lc
+
 if not hasattr(_lc, "debug"):
     _lc.debug = False
 if not hasattr(_lc, "verbose"):
@@ -32,10 +34,14 @@ if not hasattr(_lc, "verbose"):
 import streamlit as st
 
 from config import settings
-from src.utils.ollama_utils import is_ollama_running, list_ollama_models
 from src.models.llm_factory import get_available_providers, get_available_models
 from src.agents.research_agent import stream_research_agent
-from src.utils.formatters import format_full_report, format_parsed_intent, format_insights, format_paper_card
+from src.utils.formatters import (
+    format_full_report,
+    format_parsed_intent,
+    format_insights,
+    format_paper_card,
+)
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -50,7 +56,8 @@ st.set_page_config(
 )
 
 # ── Custom CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
+st.markdown(
+    """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
@@ -222,12 +229,15 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 [data-testid="stDecoration"] { background: #2a2a4a !important; }
 hr { border-color: #2a2a4a !important; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ── Session state initialisation ──────────────────────────────────────────────
 def _init_session():
     from datetime import datetime as _dt
+
     _cur_year = _dt.now().year
     defaults = {
         "session_id": str(uuid.uuid4()),
@@ -249,19 +259,20 @@ def _init_session():
         # search options
         "fast_mode": False,
         # infinite pagination / fetch-more
-        "all_papers": [],          # accumulated across all fetch rounds for current query
+        "all_papers": [],  # accumulated across all fetch rounds for current query
         "seen_paper_keys": set(),  # URL/DOI/title keys already shown (for dedup)
-        "last_search_cfg": {},     # saved params to re-run the same query
-        "is_fetching_more": False, # True while a background "fetch more" search runs
-        "no_more_papers": False,   # True when a fetch-more search returned 0 new papers
+        "last_search_cfg": {},  # saved params to re-run the same query
+        "is_fetching_more": False,  # True while a background "fetch more" search runs
+        "no_more_papers": False,  # True when a fetch-more search returned 0 new papers
         "fetch_more_queue": None,  # queue for fetch-more background thread
-        "fetch_round": 0,          # current pagination round (0=initial, 1=first fetch-more…)
-        "fetch_more_status": "",   # live status message from the fetch-more pipeline
-        "fetch_more_step": 0,      # pipeline step counter for the progress bar
+        "fetch_round": 0,  # current pagination round (0=initial, 1=first fetch-more…)
+        "fetch_more_status": "",  # live status message from the fetch-more pipeline
+        "fetch_more_step": 0,  # pipeline step counter for the progress bar
     }
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
+
 
 _init_session()
 
@@ -272,12 +283,12 @@ def render_sidebar():
         st.markdown(
             f'<div style="padding:0.8rem 0 0.4rem 0">'
             f'<span style="font-size:1.6rem;font-weight:700;'
-            f'background:linear-gradient(90deg,#a29bfe,#74b9ff);'
-            f'-webkit-background-clip:text;-webkit-text-fill-color:transparent;'
+            f"background:linear-gradient(90deg,#a29bfe,#74b9ff);"
+            f"-webkit-background-clip:text;-webkit-text-fill-color:transparent;"
             f'background-clip:text">'
-            f'{settings.APP_ICON} {settings.APP_TITLE}</span><br>'
+            f"{settings.APP_ICON} {settings.APP_TITLE}</span><br>"
             f'<span style="color:#666688;font-size:0.78rem">AI-powered research synthesis</span>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
         # Running indicator in sidebar
@@ -285,7 +296,7 @@ def render_sidebar():
             st.markdown(
                 '<div style="background:#1a1a3e;border:1px solid #3a3a7a;border-radius:8px;'
                 'padding:0.4rem 0.8rem;margin:0.4rem 0;color:#a29bfe;font-size:0.82rem">'
-                '⏳ Search in progress…</div>',
+                "⏳ Search in progress…</div>",
                 unsafe_allow_html=True,
             )
         st.divider()
@@ -294,14 +305,14 @@ def render_sidebar():
         st.subheader("🤖 AI Model")
 
         available_providers = get_available_providers()
-        all_providers = ["openai", "openrouter", "gemini", "anthropic", "ollama"]
+        # OpenAI and Anthropic have been temporarily disabled/commented out
+        # per user request; only show the active providers here.
+        all_providers = ["openrouter", "gemini", "groq"]
 
         provider_labels = {
-            "openai": "🟢 OpenAI",
             "openrouter": "🟣 OpenRouter",
             "gemini": "🔵 Google Gemini",
-            "anthropic": "🟠 Anthropic (Claude)",
-            "ollama": "⚫ Ollama (Local)",
+            "groq": "🟡 Groq",
         }
 
         # Highlight configured providers
@@ -312,8 +323,11 @@ def render_sidebar():
                 label += " ✓"
             display_providers.append(label)
 
-        provider_index = all_providers.index(st.session_state.selected_provider) \
-            if st.session_state.selected_provider in all_providers else 0
+        provider_index = (
+            all_providers.index(st.session_state.selected_provider)
+            if st.session_state.selected_provider in all_providers
+            else 0
+        )
 
         selected_display = st.selectbox(
             "Provider",
@@ -325,33 +339,16 @@ def render_sidebar():
         st.session_state.selected_provider = selected_provider
 
         # Model selection
-        if selected_provider == "ollama":
-            ollama_ok = is_ollama_running()
-            if ollama_ok:
-                ollama_models = list_ollama_models()
-                if ollama_models:
-                    st.session_state.selected_model = st.selectbox(
-                        "Ollama Model (auto-detected)",
-                        ollama_models,
-                        index=0,
-                        help="Models found in your local Ollama installation",
-                    )
-                else:
-                    st.warning("⚠️ Ollama running but no models found.\n\nRun: `ollama pull llama3.2`")
-                    st.session_state.selected_model = settings.OLLAMA_DEFAULT_MODEL
-            else:
-                st.error("❌ Ollama is not running.\n\nStart with: `ollama serve`")
-                st.session_state.selected_model = settings.OLLAMA_DEFAULT_MODEL
-        else:
-            model_options = get_available_models(selected_provider)
-            current_model = st.session_state.selected_model
-            model_index = model_options.index(current_model) \
-                if current_model in model_options else 0
-            st.session_state.selected_model = st.selectbox(
-                "Model",
-                model_options,
-                index=model_index,
-            )
+        model_options = get_available_models(selected_provider)
+        current_model = st.session_state.selected_model
+        model_index = (
+            model_options.index(current_model) if current_model in model_options else 0
+        )
+        st.session_state.selected_model = st.selectbox(
+            "Model",
+            model_options,
+            index=model_index,
+        )
 
         # API key status indicator
         _render_api_status(selected_provider)
@@ -377,8 +374,11 @@ def render_sidebar():
                 size_kb = db_path.stat().st_size / 1024
                 st.caption(f"💾 DB size: {size_kb:.1f} KB")
 
-            if st.button("🗑️ Clear Current Session", type="secondary", use_container_width=True):
+            if st.button(
+                "🗑️ Clear Current Session", type="secondary", use_container_width=True
+            ):
                 from src.memory.sqlite_memory import delete_session
+
                 delete_session(st.session_state.session_id)
                 st.session_state.session_id = str(uuid.uuid4())
                 st.session_state.research_state = None
@@ -395,19 +395,45 @@ def render_sidebar():
         st.subheader("📡 Sources")
         col1, col2 = st.columns(2)
         with col1:
-            st.session_state["src_arxiv"]   = st.checkbox("arXiv",            value=st.session_state.get("src_arxiv", True))
-            st.session_state["src_ss"]      = st.checkbox("Semantic Scholar",  value=st.session_state.get("src_ss", True))
-            st.session_state["src_core"]    = st.checkbox("CORE",              value=st.session_state.get("src_core", True))
-            st.session_state["src_ieee"]    = st.checkbox("IEEE Xplore",       value=st.session_state.get("src_ieee", True))
-            st.session_state["src_nature"]  = st.checkbox("Nature / Springer", value=st.session_state.get("src_nature", True))
-            st.session_state["src_acm"]     = st.checkbox("ACM Digital Lib.",  value=st.session_state.get("src_acm", True))
+            st.session_state["src_arxiv"] = st.checkbox(
+                "arXiv", value=st.session_state.get("src_arxiv", True)
+            )
+            # Semantic Scholar temporarily disabled
+            # st.session_state["src_ss"] = st.checkbox(
+            #     "Semantic Scholar", value=st.session_state.get("src_ss", True)
+            # )
+            st.session_state["src_core"] = st.checkbox(
+                "CORE", value=st.session_state.get("src_core", True)
+            )
+            st.session_state["src_ieee"] = st.checkbox(
+                "IEEE Xplore", value=st.session_state.get("src_ieee", True)
+            )
+            st.session_state["src_nature"] = st.checkbox(
+                "Nature / Springer", value=st.session_state.get("src_nature", True)
+            )
+            st.session_state["src_acm"] = st.checkbox(
+                "ACM Digital Lib.", value=st.session_state.get("src_acm", True)
+            )
         with col2:
-            st.session_state["src_crossref"]   = st.checkbox("CrossRef",       value=st.session_state.get("src_crossref", True))
-            st.session_state["src_web"]         = st.checkbox("Web Search",     value=st.session_state.get("src_web", True))
-            st.session_state["src_scidir"]      = st.checkbox("ScienceDirect",  value=st.session_state.get("src_scidir", True))
-            st.session_state["src_mdpi"]        = st.checkbox("MDPI",           value=st.session_state.get("src_mdpi", True))
-            st.session_state["src_springer"]    = st.checkbox("Springer Link",  value=st.session_state.get("src_springer", True))
-            st.session_state["src_openreview"]  = st.checkbox("OpenReview (NeurIPS/ICLR)", value=st.session_state.get("src_openreview", True))
+            st.session_state["src_crossref"] = st.checkbox(
+                "CrossRef", value=st.session_state.get("src_crossref", True)
+            )
+            st.session_state["src_web"] = st.checkbox(
+                "Web Search", value=st.session_state.get("src_web", True)
+            )
+            st.session_state["src_scidir"] = st.checkbox(
+                "ScienceDirect", value=st.session_state.get("src_scidir", True)
+            )
+            st.session_state["src_mdpi"] = st.checkbox(
+                "MDPI", value=st.session_state.get("src_mdpi", True)
+            )
+            st.session_state["src_springer"] = st.checkbox(
+                "Springer Link", value=st.session_state.get("src_springer", True)
+            )
+            st.session_state["src_openreview"] = st.checkbox(
+                "OpenReview (NeurIPS/ICLR)",
+                value=st.session_state.get("src_openreview", True),
+            )
 
         st.divider()
         st.subheader("⚡ Speed")
@@ -454,6 +480,7 @@ def render_sidebar():
         st.divider()
         st.subheader("📅 Publication Year")
         from datetime import datetime as _dt2
+
         _cur_yr = _dt2.now().year
         yr_col1, yr_col2 = st.columns(2)
         with yr_col1:
@@ -506,12 +533,10 @@ def _render_api_status(provider: str):
         "openrouter": settings.OPENROUTER_API_KEY,
         "gemini": settings.GOOGLE_API_KEY,
         "anthropic": settings.ANTHROPIC_API_KEY,
-        "ollama": "local",
+        "groq": settings.GROQ_API_KEY,
     }
     key = key_map.get(provider, "")
-    if provider == "ollama":
-        status = "🟢 Local — No key needed"
-    elif key and "your_" not in key and len(key) > 10:
+    if key and "your_" not in key and len(key) > 10:
         status = "🟢 API key configured"
     else:
         status = "🔴 API key missing — check .env"
@@ -539,7 +564,7 @@ def render_main():
             f'<div class="error-banner">'
             f'<div class="error-title">❌ Search failed</div>'
             f'<div class="error-body">{err["short"]}</div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
         with st.expander("🔍 Technical details (check CLI for full traceback)"):
@@ -560,8 +585,27 @@ def render_main():
         st.info("⏹ Search was stopped. You can start a new search below.", icon="ℹ️")
         st.session_state.agent_stopped = False
 
-    # ── Query input (always visible) ───────────────────────────────────────
+    # ── Query input (always visible) ───────────────────────────────────
     running = st.session_state.is_running
+
+    # ── Example queries (placed before the text area so buttons can set session state
+    #     before the `query_input` widget is instantiated — avoids Streamlit error)
+    if not running:
+        with st.expander("💡 Example queries", expanded=False):
+            examples = [
+                "IoT-based sleep monitoring with CNN/LSTM hybrid and PSO/GWO optimizers for wearable edge devices",
+                "Lightweight transformer models for real-time object detection on resource-constrained edge devices",
+                "Federated learning for privacy-preserving medical imaging diagnosis using MRI and CT scans",
+                "Large language models for automated code generation, testing, and bug-fix suggestions",
+                "Multimodal deep learning for crop disease detection using drone NDVI imagery and IoT soil sensors",
+            ]
+            for ex in examples:
+                if st.button(
+                    f"↗ {ex[:100]}", key=f"ex_{hash(ex)}", use_container_width=True
+                ):
+                    # Set session state BEFORE the text_area widget is created
+                    st.session_state["query_input"] = ex
+                    st.rerun()
 
     query = st.text_area(
         "📝 Research Query",
@@ -595,21 +639,6 @@ def render_main():
             unsafe_allow_html=True,
         )
 
-    # ── Example queries ────────────────────────────────────────────────────
-    if not running:
-        with st.expander("💡 Example queries", expanded=False):
-            examples = [
-                "IoT-based sleep monitoring with CNN/LSTM hybrid and PSO/GWO optimizers for wearable edge devices",
-                "Lightweight transformer models for real-time object detection on resource-constrained edge devices",
-                "Federated learning for privacy-preserving medical imaging diagnosis using MRI and CT scans",
-                "Large language models for automated code generation, testing, and bug-fix suggestions",
-                "Multimodal deep learning for crop disease detection using drone NDVI imagery and IoT soil sensors",
-            ]
-            for ex in examples:
-                if st.button(f"↗ {ex[:100]}", key=f"ex_{hash(ex)}", use_container_width=True):
-                    st.session_state["query_input"] = ex
-                    st.rerun()
-
     st.divider()
 
     # ── Start agent ────────────────────────────────────────────────────────
@@ -641,24 +670,24 @@ def _start_agent(query: str):
     stop_event = threading.Event()
     agent_queue: queue.Queue = queue.Queue()
 
-    st.session_state.agent_queue        = agent_queue
-    st.session_state.stop_event         = stop_event
-    st.session_state.agent_step_idx     = 0
-    st.session_state.agent_last_status  = "Starting research agent…"
-    st.session_state.agent_error        = None
-    st.session_state.agent_stopped      = False
-    st.session_state.is_running         = True
-    st.session_state.research_state     = None
+    st.session_state.agent_queue = agent_queue
+    st.session_state.stop_event = stop_event
+    st.session_state.agent_step_idx = 0
+    st.session_state.agent_last_status = "Starting research agent…"
+    st.session_state.agent_error = None
+    st.session_state.agent_stopped = False
+    st.session_state.is_running = True
+    st.session_state.research_state = None
     # Reset per-query pagination / fetch-more state
-    st.session_state.paper_page         = 0
-    st.session_state.all_papers         = []
-    st.session_state.seen_paper_keys    = set()
-    st.session_state.no_more_papers     = False
-    st.session_state.is_fetching_more   = False
-    st.session_state.fetch_more_queue   = None
-    st.session_state.fetch_round        = 0
-    st.session_state.fetch_more_status  = ""
-    st.session_state.fetch_more_step    = 0
+    st.session_state.paper_page = 0
+    st.session_state.all_papers = []
+    st.session_state.seen_paper_keys = set()
+    st.session_state.no_more_papers = False
+    st.session_state.is_fetching_more = False
+    st.session_state.fetch_more_queue = None
+    st.session_state.fetch_round = 0
+    st.session_state.fetch_more_status = ""
+    st.session_state.fetch_more_step = 0
     # Clear widget filter state so it resets to "all sources" for the new query
     for _k in ("src_filter", "year_range", "sort_by"):
         st.session_state.pop(_k, None)
@@ -669,25 +698,28 @@ def _start_agent(query: str):
         llm_model=st.session_state.selected_model,
         llm_temperature=st.session_state.get("llm_temperature", 0.3),
         memory_enabled=st.session_state.memory_enabled,
-        session_id=st.session_state.session_id if st.session_state.memory_enabled else None,
+        session_id=(
+            st.session_state.session_id if st.session_state.memory_enabled else None
+        ),
         year_min=st.session_state.get("year_min_pre"),
         year_max=st.session_state.get("year_max_pre"),
         fast_mode=st.session_state.get("fast_mode", False),
         stop_event=stop_event,
         agent_queue=agent_queue,
         enabled_sources=[
-            src for src, key in {
-                "arxiv":            "src_arxiv",
-                "semantic_scholar": "src_ss",
-                "crossref":         "src_crossref",
-                "core":             "src_core",
-                "ieee_web":         "src_ieee",
-                "sciencedirect_web":"src_scidir",
-                "mdpi_web":         "src_mdpi",
-                "nature_web":       "src_nature",
-                "acm_web":          "src_acm",
-                "springer_web":     "src_springer",
-                "openreview_web":   "src_openreview",
+            src
+            for src, key in {
+                "arxiv": "src_arxiv",
+                # "semantic_scholar": "src_ss",  # disabled
+                "crossref": "src_crossref",
+                "core": "src_core",
+                "ieee_web": "src_ieee",
+                "sciencedirect_web": "src_scidir",
+                "mdpi_web": "src_mdpi",
+                "nature_web": "src_nature",
+                "acm_web": "src_acm",
+                "springer_web": "src_springer",
+                "openreview_web": "src_openreview",
             }.items()
             if st.session_state.get(key, True)
         ],
@@ -713,17 +745,19 @@ def _start_agent(query: str):
         except Exception as exc:
             tb = traceback.format_exc()
             import logging
+
             logging.getLogger(__name__).error("Agent error:\n%s", tb)
-            agent_queue.put({
-                "_type": "error",
-                "short":  _friendly_error(exc),
-                "detail": tb,
-            })
+            agent_queue.put(
+                {
+                    "_type": "error",
+                    "short": _friendly_error(exc),
+                    "detail": tb,
+                }
+            )
 
     # Save query config (without per-run threading objects) for fetch-more re-use
     st.session_state.last_search_cfg = {
-        k: v for k, v in cfg.items()
-        if k not in ("stop_event", "agent_queue")
+        k: v for k, v in cfg.items() if k not in ("stop_event", "agent_queue")
     }
 
     threading.Thread(target=_worker, daemon=True).start()
@@ -731,6 +765,7 @@ def _start_agent(query: str):
 
 
 # ── Fetch-more helpers ───────────────────────────────────────────────────────
+
 
 def _append_papers_to_all(papers: list) -> int:
     """
@@ -764,7 +799,8 @@ def _append_papers_to_all(papers: list) -> int:
         existing_filter: list = st.session_state.get("src_filter") or []
         if existing_filter:  # only patch when the widget has already been rendered
             new_sources = {
-                p.get("source", "Unknown") for p in new_papers
+                p.get("source", "Unknown")
+                for p in new_papers
                 if p.get("source", "Unknown") not in existing_filter
             }
             if new_sources:
@@ -786,22 +822,24 @@ def _start_fetch_more():
     base_cfg = st.session_state.get("last_search_cfg") or {}
     query = base_cfg.get("query") or ""
     if not query:
-        st.warning("⚠️ Cannot fetch more: original query not found. Please run a search first.")
+        st.warning(
+            "⚠️ Cannot fetch more: original query not found. Please run a search first."
+        )
         return
     if st.session_state.get("is_fetching_more"):
         return  # already underway
 
     # Increment round so each source skips the results already shown
     round_num = int(st.session_state.get("fetch_round", 0)) + 1
-    st.session_state.fetch_round       = round_num
+    st.session_state.fetch_round = round_num
     st.session_state.fetch_more_status = "🚀 Starting fetch-more search…"
-    st.session_state.fetch_more_step   = 0
-    st.session_state.no_more_papers    = False
+    st.session_state.fetch_more_step = 0
+    st.session_state.no_more_papers = False
 
     stop_event = threading.Event()
     fq: queue.Queue = queue.Queue()
     st.session_state.fetch_more_queue = fq
-    st.session_state.stop_event       = stop_event
+    st.session_state.stop_event = stop_event
     st.session_state.is_fetching_more = True
 
     # Build a FRESH config from CURRENT sidebar state.  Only the query is
@@ -812,25 +850,26 @@ def _start_fetch_more():
         llm_provider=st.session_state.get("selected_provider"),
         llm_model=st.session_state.get("selected_model"),
         llm_temperature=st.session_state.get("llm_temperature", 0.3),
-        memory_enabled=False,   # don't re-write memory on fetch-more rounds
+        memory_enabled=False,  # don't re-write memory on fetch-more rounds
         session_id=None,
         year_min=st.session_state.get("year_min_pre"),
         year_max=st.session_state.get("year_max_pre"),
         fast_mode=st.session_state.get("fast_mode", False),
         fetch_round=round_num,
         enabled_sources=[
-            src for src, key in {
-                "arxiv":            "src_arxiv",
-                "semantic_scholar": "src_ss",
-                "crossref":         "src_crossref",
-                "core":             "src_core",
-                "ieee_web":         "src_ieee",
-                "sciencedirect_web":"src_scidir",
-                "mdpi_web":         "src_mdpi",
-                "nature_web":       "src_nature",
-                "acm_web":          "src_acm",
-                "springer_web":     "src_springer",
-                "openreview_web":   "src_openreview",
+            src
+            for src, key in {
+                "arxiv": "src_arxiv",
+                # "semantic_scholar": "src_ss",  # disabled
+                "crossref": "src_crossref",
+                "core": "src_core",
+                "ieee_web": "src_ieee",
+                "sciencedirect_web": "src_scidir",
+                "mdpi_web": "src_mdpi",
+                "nature_web": "src_nature",
+                "acm_web": "src_acm",
+                "springer_web": "src_springer",
+                "openreview_web": "src_openreview",
             }.items()
             if st.session_state.get(key, True)
         ],
@@ -840,7 +879,9 @@ def _start_fetch_more():
         final = None
         try:
             first_chunk = True
-            for upd in stream_research_agent(**cfg, stop_event=stop_event, agent_queue=fq):
+            for upd in stream_research_agent(
+                **cfg, stop_event=stop_event, agent_queue=fq
+            ):
                 if first_chunk:
                     # skip the LangGraph initial-state echo chunk
                     first_chunk = False
@@ -854,6 +895,7 @@ def _start_fetch_more():
                     fq.put({"_type": "fm_update", "status": status})
         except Exception as exc:
             import logging as _log
+
             _log.getLogger(__name__).warning("fetch-more worker failed: %s", exc)
             fq.put({"_type": "fm_error", "msg": str(exc)})
             return
@@ -903,11 +945,12 @@ def _fetch_more_fragment():
         elif mtype == "fm_complete":
             _PAGE_SIZE = 15
             import math as _math
+
             prev_total = len(st.session_state.get("all_papers") or [])
             new_added = _append_papers_to_all(msg.get("papers", []))
             st.session_state.is_fetching_more = False
             st.session_state.fetch_more_status = ""
-            st.session_state.fetch_more_step   = 0
+            st.session_state.fetch_more_step = 0
             if new_added == 0:
                 st.session_state.no_more_papers = True
             else:
@@ -927,7 +970,9 @@ def _fetch_more_fragment():
                     # page that starts at prev_total.
                     first_new_page = _math.ceil(prev_total / _PAGE_SIZE)
                     # clamp to valid range
-                    st.session_state.paper_page = min(first_new_page, new_total_pages - 1)
+                    st.session_state.paper_page = min(
+                        first_new_page, new_total_pages - 1
+                    )
                 else:
                     st.session_state.paper_page = 0  # still only 1 page; stay
             done = True
@@ -935,15 +980,15 @@ def _fetch_more_fragment():
         elif mtype == "fm_error":
             st.session_state.is_fetching_more = False
             st.session_state.fetch_more_status = ""
-            st.session_state.fetch_more_step   = 0
-            st.session_state.no_more_papers    = True
+            st.session_state.fetch_more_step = 0
+            st.session_state.no_more_papers = True
             done = True
             break
 
     # ── Live progress box (renders every second while fetch is running) ─────────
     if not done:
-        round_num   = st.session_state.get("fetch_round", 1)
-        step        = st.session_state.get("fetch_more_step", 0)
+        round_num = st.session_state.get("fetch_round", 1)
+        step = st.session_state.get("fetch_more_step", 0)
         status_text = st.session_state.get("fetch_more_status", "Starting…")
         total_steps = len(_PIPELINE_STEPS)
         pct = min(int(step / total_steps * 100), 90)
@@ -953,10 +998,10 @@ def _fetch_more_fragment():
             f'border-radius:12px;padding:0.8rem 1rem;margin-bottom:0.8rem">'
             f'<div style="color:#74b9ff;font-weight:600;font-size:0.9rem;'
             f'margin-bottom:0.4rem">'
-            f'🔍 Fetching more papers — round {round_num}…</div>'
+            f"🔍 Fetching more papers — round {round_num}…</div>"
             f'<div style="color:#aaa;font-size:0.83rem;margin-bottom:0.5rem">'
-            f'{status_text}</div>'
-            f'</div>',
+            f"{status_text}</div>"
+            f"</div>",
             unsafe_allow_html=True,
         )
         st.progress(pct, text=f"Step {step} of {total_steps}")
@@ -965,25 +1010,25 @@ def _fetch_more_fragment():
         memory_on = st.session_state.get("memory_enabled", False)
         rows = ""
         for i, (_, icon, label) in enumerate(_PIPELINE_STEPS):
-            is_mem = (i == len(_PIPELINE_STEPS) - 1)
+            is_mem = i == len(_PIPELINE_STEPS) - 1
             if is_mem and not memory_on:
                 css, dot = "step-skip", "─"
             elif i < step:
-                css, dot = "step-done",   "✅"
+                css, dot = "step-done", "✅"
             elif i == step:
                 css, dot = "step-active", "⏳"
             else:
-                css, dot = "step-wait",   "⬜"
+                css, dot = "step-wait", "⬜"
             rows += (
                 f'<div class="step-row {css}">'
                 f'<span class="step-icon">{dot}</span>'
-                f'<span>{icon} {label}</span>'
-                f'</div>'
+                f"<span>{icon} {label}</span>"
+                f"</div>"
             )
         st.markdown(
             f'<div style="background:#0a0a18;border:1px solid #2a2a4a;'
             f'border-radius:12px;padding:0.7rem 1rem;margin-top:0.5rem">'
-            f'{rows}</div>',
+            f"{rows}</div>",
             unsafe_allow_html=True,
         )
 
@@ -1006,7 +1051,9 @@ def _friendly_error(exc: Exception) -> str:
     if "503" in msg or "service unavailable" in lower:
         return "Service unavailable (503). The remote API is down — try again shortly."
     if "connection" in lower or "timeout" in lower or "timed out" in lower:
-        return "Network error — could not reach the API. Check your internet connection."
+        return (
+            "Network error — could not reach the API. Check your internet connection."
+        )
     if "model" in lower and ("not" in lower or "exist" in lower or "found" in lower):
         return f"Model not found: {msg[:120]}"
     # Generic fallback — show first 200 chars
@@ -1015,13 +1062,13 @@ def _friendly_error(exc: Exception) -> str:
 
 # Pipeline steps shown in the progress checklist
 _PIPELINE_STEPS = [
-    ("parse_query",         "🧠", "Understanding research intent"),
-    ("generate_search_plan","📋", "Planning search strategy"),
-    ("retrieve_papers",     "🔍", "Searching databases & web"),
-    ("rank_sources",        "📊", "Ranking & filtering results"),
-    ("synthesize_papers",   "🧪", "Synthesising each paper"),
-    ("generate_insights",   "🔬", "Generating research insights"),
-    ("update_memory",       "💾", "Updating memory"),
+    ("parse_query", "🧠", "Understanding research intent"),
+    ("generate_search_plan", "📋", "Planning search strategy"),
+    ("retrieve_papers", "🔍", "Searching databases & web"),
+    ("rank_sources", "📊", "Ranking & filtering results"),
+    ("synthesize_papers", "🧪", "Synthesising each paper"),
+    ("generate_insights", "🔬", "Generating research insights"),
+    ("update_memory", "💾", "Updating memory"),
 ]
 
 
@@ -1055,8 +1102,8 @@ def _progress_fragment():
 
             elif mtype == "update":
                 step_idx += 1
-                st.session_state.agent_step_idx     = step_idx
-                st.session_state.agent_last_status  = msg.get("status_message", "")
+                st.session_state.agent_step_idx = step_idx
+                st.session_state.agent_last_status = msg.get("status_message", "")
 
             elif mtype == "complete":
                 finished = True
@@ -1065,8 +1112,9 @@ def _progress_fragment():
                     # Strip non-serialisable internal threading objects before
                     # storing in session_state — prevents potential Streamlit
                     # serialisation errors on newer versions.
-                    clean_state = {k: v for k, v in state.items()
-                                   if not k.startswith("_")}
+                    clean_state = {
+                        k: v for k, v in state.items() if not k.startswith("_")
+                    }
                     st.session_state.research_state = clean_state
                     # Accumulate ranked/synthesised papers into the global list.
                     # This is what the pagination UI reads from, enabling
@@ -1079,16 +1127,21 @@ def _progress_fragment():
                         st.session_state.session_id = clean_state.get(
                             "session_id", st.session_state.session_id
                         )
-                    st.session_state.query_history.insert(0, {
-                        "query": clean_state.get("query", ""),
-                        "paper_count": len(clean_state.get("synthesized_papers", [])),
-                    })
+                    st.session_state.query_history.insert(
+                        0,
+                        {
+                            "query": clean_state.get("query", ""),
+                            "paper_count": len(
+                                clean_state.get("synthesized_papers", [])
+                            ),
+                        },
+                    )
                 st.session_state.is_running = False
                 break
 
             elif mtype == "stopped":
                 finished = True
-                st.session_state.is_running    = False
+                st.session_state.is_running = False
                 st.session_state.agent_stopped = True
                 raw = msg.get("state")
                 if raw:
@@ -1099,9 +1152,9 @@ def _progress_fragment():
 
             elif mtype == "error":
                 finished = True
-                st.session_state.is_running  = False
+                st.session_state.is_running = False
                 st.session_state.agent_error = {
-                    "short":  msg.get("short", "Unknown error"),
+                    "short": msg.get("short", "Unknown error"),
                     "detail": msg.get("detail", ""),
                 }
                 break
@@ -1111,14 +1164,14 @@ def _progress_fragment():
     # Exclude the memory step from the total when memory is disabled,
     # so the progress bar reaches 100 % after generate_insights.
     total = len(_PIPELINE_STEPS) - (0 if memory_on else 1)
-    pct   = min(int(step_idx / total * 100), 99) if not finished else 100
+    pct = min(int(step_idx / total * 100), 99) if not finished else 100
 
     with st.container():
         hdr_col, stop_col = st.columns([4, 1])
         with hdr_col:
             st.markdown(
                 '<p style="font-size:1rem;font-weight:600;color:#a29bfe;margin:0">'
-                '⚙️ Research in progress…</p>',
+                "⚙️ Research in progress…</p>",
                 unsafe_allow_html=True,
             )
         with stop_col:
@@ -1133,7 +1186,7 @@ def _progress_fragment():
             if stop_clicked:
                 if stop_event:
                     stop_event.set()
-                st.session_state.is_running    = False
+                st.session_state.is_running = False
                 st.session_state.agent_stopped = True
                 st.rerun()  # full page rerun to show stopped state
 
@@ -1142,26 +1195,26 @@ def _progress_fragment():
         # Step checklist
         rows = ""
         for i, (node_key, icon, label) in enumerate(_PIPELINE_STEPS):
-            is_memory = (node_key == "update_memory")
+            is_memory = node_key == "update_memory"
             if is_memory and not memory_on:
                 # Memory disabled — step never runs; show as dimmed/skipped
                 css, dot = "step-skip", "─"
             elif finished or i < step_idx:
-                css, dot = "step-done",   "✅"
+                css, dot = "step-done", "✅"
             elif i == step_idx:
                 css, dot = "step-active", "⏳"
             else:
-                css, dot = "step-wait",   "⬜"
+                css, dot = "step-wait", "⬜"
             rows += (
                 f'<div class="step-row {css}">'
                 f'<span class="step-icon">{dot}</span>'
-                f'<span>{icon} {label}</span>'
-                f'</div>'
+                f"<span>{icon} {label}</span>"
+                f"</div>"
             )
         st.markdown(
             f'<div style="background:#0a0a18;border:1px solid #2a2a4a;'
             f'border-radius:12px;padding:0.7rem 1rem;margin-top:0.5rem">'
-            f'{rows}</div>',
+            f"{rows}</div>",
             unsafe_allow_html=True,
         )
 
@@ -1192,17 +1245,21 @@ def render_results(state: dict):
         return
 
     # ── Tabs ────────────────────────────────────────────────────────────────
-    tab_papers, tab_insights, tab_intent, tab_raw = st.tabs([
-        f"📚 Papers ({len(papers)})",
-        "🔬 Research Insights",
-        "🧠 Query Analysis",
-        "📥 Export / Raw",
-    ])
+    tab_papers, tab_insights, tab_intent, tab_raw = st.tabs(
+        [
+            f"📚 Papers ({len(papers)})",
+            "🔬 Research Insights",
+            "🧠 Query Analysis",
+            "📥 Export / Raw",
+        ]
+    )
 
     # ── Tab 1: Papers ──────────────────────────────────────────────────────
     with tab_papers:
         if not papers:
-            st.info("No papers retrieved. Try broadening your query or enabling more sources.")
+            st.info(
+                "No papers retrieved. Try broadening your query or enabling more sources."
+            )
         else:
             sources = {p.get("source", "Unknown") for p in papers}
             years = sorted([p.get("year") for p in papers if p.get("year")])
@@ -1217,7 +1274,7 @@ def render_results(state: dict):
                 f'<div class="metric-pill"><div class="val">{len(sources)}</div><div class="lbl">Sources</div></div>'
                 f'<div class="metric-pill"><div class="val">{yr_range}</div><div class="lbl">Years</div></div>'
                 f'<div class="metric-pill"><div class="val">{avg_cite}</div><div class="lbl">Avg Citations</div></div>'
-                f'</div>',
+                f"</div>",
                 unsafe_allow_html=True,
             )
             st.markdown("---")
@@ -1256,9 +1313,13 @@ def render_results(state: dict):
             # Papers with no year information are always included — excluding
             # them based on a missing year would hide most fetched results.
             filtered = [
-                p for p in papers
+                p
+                for p in papers
                 if p.get("source", "") in src_filter
-                and (not p.get("year") or year_range[0] <= int(p.get("year")) <= year_range[1])
+                and (
+                    not p.get("year")
+                    or year_range[0] <= int(p.get("year")) <= year_range[1]
+                )
             ]
 
             if sort_by == "Year (newest)":
@@ -1269,6 +1330,7 @@ def render_results(state: dict):
 
             # ── Pagination ──────────────────────────────────────────────────
             import math as _math
+
             _PAGE_SIZE = 15
             total_pages = max(1, _math.ceil(len(filtered) / _PAGE_SIZE))
 
@@ -1281,12 +1343,12 @@ def render_results(state: dict):
                 st.session_state.paper_page = total_pages - 1
 
             _start = st.session_state.paper_page * _PAGE_SIZE
-            _end   = _start + _PAGE_SIZE
+            _end = _start + _PAGE_SIZE
             page_papers = filtered[_start:_end]
-            on_last_page = (st.session_state.paper_page >= total_pages - 1)
+            on_last_page = st.session_state.paper_page >= total_pages - 1
 
             is_fetching_more = st.session_state.get("is_fetching_more", False)
-            no_more_papers   = st.session_state.get("no_more_papers", False)
+            no_more_papers = st.session_state.get("no_more_papers", False)
 
             st.caption(
                 f"Showing {_start + 1}–{min(_end, len(filtered))} "
@@ -1331,7 +1393,7 @@ def render_results(state: dict):
                     st.markdown(
                         '<div style="text-align:center;color:#a29bfe;'
                         'padding-top:0.4rem;font-size:0.9rem">'
-                        '⏳ Fetching more…</div>',
+                        "⏳ Fetching more…</div>",
                         unsafe_allow_html=True,
                     )
                 elif on_last_page and no_more_papers:
@@ -1344,10 +1406,10 @@ def render_results(state: dict):
                     )
                 else:
                     next_label = "Next ▶  🔍 search more" if on_last_page else "Next ▶"
-                    next_help  = (
+                    next_help = (
                         "Runs a new search and appends fresh results to this list."
-                        if on_last_page else
-                        "Go to the next page of already-fetched results."
+                        if on_last_page
+                        else "Go to the next page of already-fetched results."
                     )
                     if st.button(
                         next_label,
@@ -1356,7 +1418,7 @@ def render_results(state: dict):
                         help=next_help,
                     ):
                         if on_last_page:
-                            _start_fetch_more()   # triggers new background search
+                            _start_fetch_more()  # triggers new background search
                         else:
                             st.session_state.paper_page += 1
                             st.rerun()
@@ -1366,6 +1428,20 @@ def render_results(state: dict):
         if not insights:
             st.info("Run the agent to generate insights.")
         else:
+            # Provide downloadable Markdown export for the insights block
+            try:
+                insights_md = format_insights(insights)
+            except Exception:
+                insights_md = ""
+            if insights_md.strip():
+                st.download_button(
+                    "⬇️ Download Insights (Markdown)",
+                    data=insights_md,
+                    file_name=f"research_insights_{_slug(state.get('query',''))}.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
+
             if overview := insights.get("overview"):
                 st.info(f"📌 **Overview:** {overview}")
 
@@ -1373,10 +1449,14 @@ def render_results(state: dict):
             maturity = insights.get("maturity_level", "")
             if maturity:
                 maturity_colors = {
-                    "emerging": "🟡", "growing": "🟢",
-                    "mature": "🔵", "saturated": "🟠",
+                    "emerging": "🟡",
+                    "growing": "🟢",
+                    "mature": "🔵",
+                    "saturated": "🟠",
                 }
-                st.markdown(f"**Field Maturity:** {maturity_colors.get(maturity, '⚪')} {maturity.title()}")
+                st.markdown(
+                    f"**Field Maturity:** {maturity_colors.get(maturity, '⚪')} {maturity.title()}"
+                )
 
             st.markdown("---")
 
@@ -1386,34 +1466,46 @@ def render_results(state: dict):
                 if trends := insights.get("emerging_trends"):
                     st.markdown("### 📈 Emerging Trends")
                     for t in trends:
-                        st.markdown(f"""
+                        st.markdown(
+                            f"""
                         <div class="insight-card">🔺 {t}</div>
-                        """, unsafe_allow_html=True)
+                        """,
+                            unsafe_allow_html=True,
+                        )
 
                 if gaps := insights.get("research_gaps"):
                     st.markdown("### 🧩 Research Gaps")
                     for g in gaps:
-                        st.markdown(f"""
+                        st.markdown(
+                            f"""
                         <div class="insight-card" style="border-left-color:#e17055;">
                         🔍 {g}</div>
-                        """, unsafe_allow_html=True)
+                        """,
+                            unsafe_allow_html=True,
+                        )
 
             with icol2:
                 if challenges := insights.get("common_challenges"):
                     st.markdown("### ⚠️ Common Challenges")
                     for c in challenges:
-                        st.markdown(f"""
+                        st.markdown(
+                            f"""
                         <div class="insight-card" style="border-left-color:#fdcb6e;">
                         ⚡ {c}</div>
-                        """, unsafe_allow_html=True)
+                        """,
+                            unsafe_allow_html=True,
+                        )
 
                 if directions := insights.get("suggested_directions"):
                     st.markdown("### 💡 Suggested Research Directions")
                     for d in directions:
-                        st.markdown(f"""
+                        st.markdown(
+                            f"""
                         <div class="insight-card" style="border-left-color:#00b894;">
                         🚀 {d}</div>
-                        """, unsafe_allow_html=True)
+                        """,
+                            unsafe_allow_html=True,
+                        )
 
             if interdisc := insights.get("interdisciplinary_connections"):
                 st.markdown("### 🔗 Interdisciplinary Connections")
@@ -1438,6 +1530,20 @@ def render_results(state: dict):
         else:
             st.markdown(f"**Original Query:**\n> {state.get('query', '')}")
             st.markdown("---")
+
+            # Download parsed intent as Markdown
+            try:
+                intent_md = format_parsed_intent(intent)
+            except Exception:
+                intent_md = ""
+            if intent_md.strip():
+                st.download_button(
+                    "⬇️ Download Parsed Intent (Markdown)",
+                    data=intent_md,
+                    file_name=f"parsed_intent_{_slug(state.get('query',''))}.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
 
             ifields = {
                 "🏷️ Domain": intent.get("domain"),
@@ -1479,13 +1585,11 @@ def render_results(state: dict):
 
         # JSON export
         import json
+
         export_data = {
             "query": state.get("query"),
             "parsed_intent": state.get("parsed_intent"),
-            "papers": [
-                {k: v for k, v in p.items() if k != "raw"}
-                for p in papers
-            ],
+            "papers": [{k: v for k, v in p.items() if k != "raw"} for p in papers],
             "insights": state.get("insights"),
         }
         st.download_button(
@@ -1505,25 +1609,26 @@ def render_results(state: dict):
 def _render_paper_card(paper: dict, index: int):
     source = paper.get("source", "Unknown")
     source_class = {
-        "arXiv":            "tag-arxiv",
+        "arXiv": "tag-arxiv",
         "Semantic Scholar": "tag-ss",
-        "CrossRef":         "tag-crossref",
-        "CORE":             "tag-core",
-        "IEEE Xplore":      "tag-ieee",
-        "Elsevier":         "tag-elsevier",
-        "MDPI":             "tag-mdpi",
-        "Nature":           "tag-nature",
-        "Springer":         "tag-nature",
+        "CrossRef": "tag-crossref",
+        "CORE": "tag-core",
+        "IEEE Xplore": "tag-ieee",
+        "Elsevier": "tag-elsevier",
+        "MDPI": "tag-mdpi",
+        "Nature": "tag-nature",
+        "Springer": "tag-nature",
     }.get(source, "tag-web")
 
-    title      = paper.get("title") or "Untitled"
-    year       = paper.get("year") or ""
-    citations  = paper.get("citation_count")
-    cite_str   = f"{citations:,}" if isinstance(citations, int) else "—"
-    relevance  = float(paper.get("relevance_score") or 0.0)
-    url        = paper.get("url", "")
-    pdf_url    = paper.get("pdf_url", "")
-    doi        = paper.get("doi", "")
+    title = paper.get("title") or "Untitled"
+    year = paper.get("year") or ""
+    citations = paper.get("citation_count")
+    cite_str = f"{citations:,}" if isinstance(citations, int) else "—"
+    relevance = float(paper.get("relevance_score") or 0.0)
+    relevance_5 = relevance * 5.0
+    url = paper.get("url", "")
+    pdf_url = paper.get("pdf_url", "")
+    doi = paper.get("doi", "")
 
     authors_raw = paper.get("authors", [])
     if isinstance(authors_raw, list):
@@ -1533,45 +1638,58 @@ def _render_paper_card(paper: dict, index: int):
     else:
         authors = str(authors_raw)
 
-    synth        = paper.get("synthesis") or {}
-    summary      = synth.get("summary") or (paper.get("abstract") or "")[:350] or "_No summary available._"
-    methodology  = synth.get("methodology", "")
+    synth = paper.get("synthesis") or {}
+    summary = (
+        synth.get("summary")
+        or (paper.get("abstract") or "")[:350]
+        or "_No summary available._"
+    )
+    methodology = synth.get("methodology", "")
     contribution = synth.get("contribution", "")
-    limitations  = synth.get("limitations", "")
+    limitations = synth.get("limitations", "")
     future_scope = synth.get("future_scope", "")
 
     # Relevance colour bar
-    rel_pct   = min(int(relevance * 100), 100)
-    rel_color = "#55efc4" if rel_pct >= 70 else "#fdcb6e" if rel_pct >= 40 else "#ff7675"
+    rel_pct = min(int(relevance * 100), 100)
+    rel_color = (
+        "#55efc4" if rel_pct >= 70 else "#fdcb6e" if rel_pct >= 40 else "#ff7675"
+    )
 
     # Compact header card — build pieces then join to avoid nested f-string issues
     icon = "📄" if pdf_url else "🔗"
     title_short = title[:110] + ("…" if len(title) > 110 else "")
 
-    year_span  = (f'<span style="color:#888;font-size:0.78rem">{year}</span>'
-                  if year else "")
-    cite_span  = (f'<span style="color:#666688;font-size:0.75rem">· {cite_str} citations</span>'
-                  if cite_str and cite_str != "—" else "")
-    auth_div   = (f'<div style="margin-top:0.3rem;font-size:0.77rem;color:#666688">👥 {authors}</div>'
-                  if authors else "")
+    year_span = (
+        f'<span style="color:#888;font-size:0.78rem">{year}</span>' if year else ""
+    )
+    cite_span = (
+        f'<span style="color:#666688;font-size:0.75rem">· {cite_str} citations</span>'
+        if cite_str and cite_str != "—"
+        else ""
+    )
+    auth_div = (
+        f'<div style="margin-top:0.3rem;font-size:0.77rem;color:#666688">👥 {authors}</div>'
+        if authors
+        else ""
+    )
 
     header_html = (
         f'<div class="paper-card">'
         f'<div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap">'
         f'  <span class="paper-number">{index}</span>'
         f'  <span class="source-tag {source_class}">{source}</span>'
-        f'  {year_span}'
-        f'  <span style="margin-left:auto;color:{rel_color};font-size:0.78rem;font-weight:600">★ {relevance:.2f}</span>'
-        f'  {cite_span}'
-        f'</div>'
+        f"  {year_span}"
+        f'  <span style="margin-left:auto;color:{rel_color};font-size:0.78rem;font-weight:600">★ {relevance_5:.1f}/5</span>'
+        f"  {cite_span}"
+        f"</div>"
         f'<div style="margin-top:0.4rem;font-size:0.93rem;font-weight:500;line-height:1.45;color:#c8c8e8">'
-        f'  {icon} {title_short}'
-        f'</div>'
-        f'{auth_div}'
+        f"  {icon} {title_short}"
+        f"</div>"
+        f"{auth_div}"
         f'<div style="margin-top:6px;height:3px;border-radius:2px;background:#1e1e3e">'
         f'  <div style="width:{rel_pct}%;height:100%;border-radius:2px;background:{rel_color};opacity:.6"></div>'
-        f'</div>'
-        f'</div>'
+        f"</div>"
+        f"</div>"
     )
     st.markdown(header_html, unsafe_allow_html=True)
 
@@ -1586,6 +1704,20 @@ def _render_paper_card(paper: dict, index: int):
             links.append(f"DOI: `{doi}`")
         if links:
             st.markdown("  ·  ".join(links))
+
+        # Offer per-paper Markdown download using formatter
+        try:
+            paper_md = format_paper_card(paper, index)
+        except Exception:
+            paper_md = ""
+        if paper_md.strip():
+            st.download_button(
+                "⬇️ Download Paper (Markdown)",
+                data=paper_md,
+                file_name=f"paper_{index}_{_slug(title)}.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
 
         st.markdown("---")
 
@@ -1621,13 +1753,20 @@ def render_history_modal():
 
     with st.sidebar:
         st.subheader("📚 Session History")
-        from src.memory.sqlite_memory import list_sessions, get_messages, get_papers_seen
+        from src.memory.sqlite_memory import (
+            list_sessions,
+            get_messages,
+            get_papers_seen,
+        )
+
         sessions = list_sessions()
         if not sessions:
             st.info("No saved sessions yet.")
         else:
             for sess in sessions[:10]:
-                with st.expander(f"🗓️ {sess.get('title', 'Session')} — {sess['created_at'][:10]}"):
+                with st.expander(
+                    f"🗓️ {sess.get('title', 'Session')} — {sess['created_at'][:10]}"
+                ):
                     msgs = get_messages(sess["session_id"])
                     papers = get_papers_seen(sess["session_id"])
                     st.caption(f"{len(msgs)} messages · {len(papers)} papers reviewed")
@@ -1643,6 +1782,7 @@ def render_history_modal():
 def _slug(text: str, max_len: int = 30) -> str:
     """Create a filename-safe slug from text."""
     import re
+
     return re.sub(r"[^a-z0-9]+", "_", (text or "query").lower())[:max_len].strip("_")
 
 

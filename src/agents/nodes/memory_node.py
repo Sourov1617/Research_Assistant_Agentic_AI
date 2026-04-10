@@ -2,6 +2,7 @@
 Memory Node — store session history and generate follow-up recommendations.
 Active only when the user has toggled memory on.
 """
+
 from __future__ import annotations
 
 import json
@@ -24,10 +25,11 @@ from src.memory.sqlite_memory import (
 
 logger = logging.getLogger(__name__)
 
-_FOLLOWUP_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """You are a personalized research advisor with memory of the user's past work.
+_FOLLOWUP_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """You are a personalized research advisor with memory of the user's past work.
 Based on the session history and current findings, suggest next steps and follow-up reading.
 
 Return ONLY valid JSON:
@@ -43,18 +45,19 @@ Return ONLY valid JSON:
   ],
   "progress_note": "Brief note on how the research is evolving across sessions"
 }}""",
-    ),
-    (
-        "human",
-        """Session history summary:
+        ),
+        (
+            "human",
+            """Session history summary:
 {history_summary}
 
 Current query: {current_query}
 Current insights: {insights_json}
 
 Return only the JSON.""",
-    ),
-])
+        ),
+    ]
+)
 
 
 def update_memory_node(state: "ResearchState") -> "ResearchState":
@@ -65,7 +68,7 @@ def update_memory_node(state: "ResearchState") -> "ResearchState":
     if not state.get("memory_enabled", False):
         return {**state, "memory_suggestions": []}
 
-    from src.models.llm_factory import get_llm
+    from src.models.llm_factory import invoke_with_provider_failover
 
     session_id = state.get("session_id") or ""
     query = state.get("query", "")
@@ -93,6 +96,7 @@ def update_memory_node(state: "ResearchState") -> "ResearchState":
         # Store papers in vector memory for semantic search
         try:
             from src.memory.vector_memory import get_vector_store
+
             get_vector_store().add_papers(papers)
         except Exception as ve:
             logger.warning("Vector store update failed: %s", ve)
@@ -100,17 +104,18 @@ def update_memory_node(state: "ResearchState") -> "ResearchState":
         # Generate personalised follow-up suggestions
         history_summary = get_session_summary(session_id)
 
-        llm = get_llm(
+        followup = invoke_with_provider_failover(
+            _FOLLOWUP_PROMPT,
+            {
+                "history_summary": history_summary,
+                "current_query": query,
+                "insights_json": json.dumps(insights, indent=2)[:1000],
+            },
             provider=state.get("llm_provider"),
             model=state.get("llm_model"),
+            temperature=state.get("llm_temperature"),
+            parser=RobustJsonOutputParser(),
         )
-        chain = _FOLLOWUP_PROMPT | llm | RobustJsonOutputParser()
-
-        followup = chain.invoke({
-            "history_summary": history_summary,
-            "current_query": query,
-            "insights_json": json.dumps(insights, indent=2)[:1000],
-        })
         suggestions = followup.get("suggestions", []) + [
             f"Try searching: '{q}'" for q in followup.get("next_queries", [])
         ]
@@ -121,7 +126,9 @@ def update_memory_node(state: "ResearchState") -> "ResearchState":
         logger.error("Memory node failed: %s", exc)
         suggestions = []
 
-    logger.info("Memory updated for session %s; %d suggestions", session_id, len(suggestions))
+    logger.info(
+        "Memory updated for session %s; %d suggestions", session_id, len(suggestions)
+    )
 
     return {
         **state,
