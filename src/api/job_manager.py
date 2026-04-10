@@ -69,6 +69,11 @@ class KafkaEventPublisher:
                 ],
                 value_serializer=lambda payload: json.dumps(payload).encode("utf-8"),
             )
+            logger.info(
+                "Kafka producer initialized for brokers=%s topic_prefix=%s",
+                settings.KAFKA_BOOTSTRAP_SERVERS,
+                settings.KAFKA_TOPIC_PREFIX,
+            )
         except Exception as exc:
             logger.warning("Kafka producer initialization failed: %s", exc)
             self._enabled = False
@@ -76,9 +81,12 @@ class KafkaEventPublisher:
 
     def publish(self, topic: str, payload: dict[str, Any]) -> None:
         if not self._enabled or self._producer is None:
+            logger.debug("Kafka publish skipped: enabled=%s producer=%s", self._enabled, self._producer)
             return
         try:
+            logger.info("Publishing Kafka event %s to %s", payload.get("event"), topic)
             self._producer.send(topic, payload)
+            logger.debug("Kafka publish queued for topic %s", topic)
         except Exception as exc:
             logger.warning("Kafka publish failed for topic %s: %s", topic, exc)
 

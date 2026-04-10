@@ -137,7 +137,7 @@ DEBUG_MODE: bool = _get("DEBUG_MODE", False, bool)
 API_CORS_ORIGINS: str = _get("API_CORS_ORIGINS", "*")
 
 # ── Kafka / Event Streaming ───────────────────────────────────────────────────
-KAFKA_ENABLED: bool = _get("KAFKA_ENABLED", False, bool)
+KAFKA_ENABLED: bool = _get("KAFKA_ENABLED", True, bool)
 KAFKA_BOOTSTRAP_SERVERS: str = _get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC_PREFIX: str = _get("KAFKA_TOPIC_PREFIX", "research_assistant")
 
